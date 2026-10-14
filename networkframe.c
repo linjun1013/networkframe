@@ -87,7 +87,8 @@ thread_pool* initThreadPool(int cnt,  void* func)
 {
     if(cnt <= 0)
         return NULL;
-
+    if(func == NULL)
+        func = thread_work;
     thread_pool *pool = (thread_pool *)malloc(sizeof(thread_pool));
     pool->threads = (thread_info **)malloc(sizeof(void*)*cnt);
 
