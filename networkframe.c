@@ -12,8 +12,16 @@
 
 #include"networkframe.h"
 
+#include <sys/sdt.h>
+
+void probeThread(void * arg)
+{
+    DTRACE_PROBE1(network, thread, arg);
+}
+
 static void* thread_work(void *arg)
 {
+    probeThread(arg);
     thread_info *info = (thread_info *)arg;
     int index = info ->target;
     printf("threads :%d\n", index);
@@ -87,8 +95,10 @@ thread_pool* initThreadPool(int cnt,  void* func)
 {
     if(cnt <= 0)
         return NULL;
+
     if(func == NULL)
         func = thread_work;
+
     thread_pool *pool = (thread_pool *)malloc(sizeof(thread_pool));
     pool->threads = (thread_info **)malloc(sizeof(void*)*cnt);
 
@@ -117,6 +127,7 @@ void destoryThreadPool(thread_pool *pool)
         close(pool->threads[i]->pipefd[1]);
         free(pool->threads[i]);
     }
+
     free(pool->threads);
     pool->threads = NULL;
 }
@@ -136,7 +147,7 @@ void notifyThread(thread_pool *pool, void * var)
 
 #define EPOLL_EVENT_CNT 16
 
-void start_netframework(thread_pool* pool, int *fds, int fd_cnt)
+void netframework_loop(thread_pool* pool, int *fds, int fd_cnt)
 {
     if(pool == NULL || fds == NULL){
         printf("thread pool or fds is NULL \n");
