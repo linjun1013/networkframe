@@ -1,0 +1,12 @@
+#!/usr/bin/stap
+
+probe process("./net_work").library("libnet.so").mark("thread")
+{
+    printf("response len=%p, index:%d\n", $arg1, $arg2)
+}
+
+
+probe process("./net_work").library("libnet.so").mark("read")
+{
+     printf("recv msg => %s \n",user_string($arg1))
+}
