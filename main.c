@@ -30,6 +30,8 @@
 #include <string.h>
 
 
+#include "networkframe.h"
+#include "rpc.h"
 
 
 void signal_handler(int sig)
@@ -37,6 +39,7 @@ void signal_handler(int sig)
     printf("cache signal %d, exit\n", sig);
     exit(0);
 }
+
 
 int main(void)
 {

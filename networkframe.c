@@ -11,14 +11,23 @@
 #include<fcntl.h>
 
 #include"networkframe.h"
+#include"rpc.h"
 
 #include <sys/sdt.h>
 
+
+
+
 void probeThread(void * arg, int var)
 {
-    DTRACE_PROBE2(network, thread, arg, var);
+    DTRACE_PROBE2(network, thread, arg, var);   
 }
 
+void peobeRead(void *arg)
+{
+    DTRACE_PROBE1(network, read, arg);
+}
+    
 static void* thread_work(void *arg)
 {
     ThreadInfo *info = (ThreadInfo *)arg;
@@ -41,7 +50,7 @@ static void* thread_work(void *arg)
     event.events = EPOLLIN;
     epoll_ctl(efd, EPOLL_CTL_ADD, pipefd, &event);
     struct epoll_event evs[16];
-
+    // <fd, buff>
     while(1){
         int nfds = epoll_wait(efd, evs, 16, -1);
         for(int i = 0; i < nfds; i++)
@@ -49,7 +58,15 @@ static void* thread_work(void *arg)
             if(((evs[i].events & EPOLLIN) && evs[i].data.fd != pipefd)){
                 int fd = evs[i].data.fd;
                 int len = 0, ret = 0;
-     
+                //FdBuff *fdbuf = (FdBuff *) HashTableLookup(info->fd_bufhash, &fd, sizeof(fd));
+                //char *msg = fdbuff->fixbuf;
+                //int max_mag_len = 1024;
+                //if(fdbuff->extbuf){
+                //    msg = extbuf;
+                //    max_mag_len = ext_len;
+                //}
+                    
+                
                 while((len < 1024) && (ret = read(fd, msg+len, 1024))) {
                     if(ret > 0)
                         len += ret;
@@ -61,12 +78,21 @@ static void* thread_work(void *arg)
                     msg[len] = 0;
                 else
                     msg[1023] = 0;
-
+                
+                peobeRead(msg);
                 printf(" ==> get a new read %d  len:%d\n", fd, len);
                 if(unlikely(fun_ptr)){
                     fun_ptr((ThreadInfo *)arg, msg, len);
                 }else if(len){
-                    write(fd, msg, len);
+                    char * param;
+                    int param_len;
+                     unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len); 
+                     if(cmd_type > 0 && cmd_type < MAX_CMD_CNT){
+                        if(rpcCmdArray[cmd_type] && rpcCmdArray[cmd_type]->func){
+                            rpcCmdArray[cmd_type]->func(info, param, param_len);
+                        }
+                     }
+                     write(fd, msg, len);
                 }
                 
                 if(len == 0){
@@ -79,6 +105,7 @@ static void* thread_work(void *arg)
                 int flags = fcntl(cid, F_GETFL, 0);
                 fcntl(cid, F_SETFL, flags | O_NONBLOCK);
                 
+
                 struct epoll_event event;
                 event.data.fd = cid;
                 event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
@@ -100,6 +127,17 @@ static void* thread_work(void *arg)
     return NULL;
 }
 
+
+void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set)
+{
+    if(pool == NULL || set == NULL)
+        return;
+
+    for(int i = 0; i< pool->size; i++)
+    {
+        sched_setaffinity(pool->threads[i]->tid, sizeof(*set), &set);    
+    }
+}
 
 
 ThreadPool* initThreadPool(int cnt,  void* func)
@@ -165,6 +203,7 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
         return;
     }
 
+
     int efd = epoll_create(256);
     struct epoll_event event;
     int pos = 0;
@@ -190,8 +229,7 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
                     int index = 0;
                     if(thread_cnt > 0)
                         index = c_ids++ % thread_cnt;
-
-
+                    // hash(client_sockfd , index) 
                     write(pool->threads[index]->pipefd[1], cid, strlen(cid));
 
                     printf("===> accept fd:%d  thread index:%d\n", client_sockfd, index);
