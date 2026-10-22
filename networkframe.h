@@ -6,17 +6,19 @@
 
 
 
-thread_pool* initThreadPool(int cnt, void * func);
+ThreadPool* initThreadPool(int cnt, void* func);
 
-void destoryThreadPool(thread_pool *pool);
+void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set);
 
-void notifyThread(thread_pool *pool, void * var);
+void destoryThreadPool(ThreadPool* pool);
+
+void notifyThread(ThreadPool* pool, void* var);
 
 
-int init_address(const char * addr, unsigned int port);
-int init_address_v6(const char * addr, unsigned int port);
+int init_address(const char* addr, unsigned int port);
+int init_address_v6(const char* addr, unsigned int port);
 
-void start_netframework(thread_pool* pool, int *fds, int fd_cnt);
+void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt);
 
 
 #endif

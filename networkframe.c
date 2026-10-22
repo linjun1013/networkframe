@@ -14,16 +14,16 @@
 
 #include <sys/sdt.h>
 
-void probeThread(void * arg)
+void probeThread(void * arg, int var)
 {
-    DTRACE_PROBE1(network, thread, arg);
+    DTRACE_PROBE2(network, thread, arg, var);
 }
 
 static void* thread_work(void *arg)
 {
-    probeThread(arg);
-    thread_info *info = (thread_info *)arg;
+    ThreadInfo *info = (ThreadInfo *)arg;
     int index = info ->target;
+    probeThread(info, index);
     printf("threads :%d\n", index);
     char name[16] = {0};
     snprintf(name, 16, "thread_%d",index);
@@ -31,11 +31,10 @@ static void* thread_work(void *arg)
     pthread_setname_np(tid, name);
 
     int pipefd = info->pipefd[0];
-    void  (*fun_ptr)(thread_info * var, char *, int len) = info->thread_hander;
+    void  (*fun_ptr)(ThreadInfo * var, char *, int len) = info->thread_hander;
 
     char buff[16] = {0};
     char msg[1024] = {0};
-    int cid = 0;
     int efd = epoll_create(16);
     struct epoll_event event;
     event.data.fd = pipefd;
@@ -47,32 +46,44 @@ static void* thread_work(void *arg)
         int nfds = epoll_wait(efd, evs, 16, -1);
         for(int i = 0; i < nfds; i++)
         {
-            if((evs[i].events & EPOLLIN && evs[i].data.fd != pipefd)){
+            if(((evs[i].events & EPOLLIN) && evs[i].data.fd != pipefd)){
                 int fd = evs[i].data.fd;
                 int len = 0, ret = 0;
-                while((len < 1024) && (ret = read(fd, msg+len, 1024))){
-                    len += ret;
+     
+                while((len < 1024) && (ret = read(fd, msg+len, 1024))) {
+                    if(ret > 0)
+                        len += ret;
+                    else
+                        break;
                 }
 
+                if(len < 1024)
+                    msg[len] = 0;
+                else
+                    msg[1023] = 0;
+
+                printf(" ==> get a new read %d  len:%d\n", fd, len);
                 if(unlikely(fun_ptr)){
-                    fun_ptr((thread_info *)arg, msg, len);
+                    fun_ptr((ThreadInfo *)arg, msg, len);
                 }else if(len){
-                    write(fd, msg, sizeof(msg));
+                    write(fd, msg, len);
                 }
                 
                 if(len == 0){
                 
                 }
-            }else if(evs[i].events & EPOLLIN && evs[i].data.fd == pipefd){
+            }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
                 read(pipefd, buff, sizeof(buff));
-                cid = atoi(buff);
-                printf("get a new connect %d\n", cid);
+                int cid = atoi(buff);
+                printf(" ==> get a new connect %d pipe:%d\n", cid, pipefd);
                 int flags = fcntl(cid, F_GETFL, 0);
                 fcntl(cid, F_SETFL, flags | O_NONBLOCK);
-
+                
+                struct epoll_event event;
                 event.data.fd = cid;
-                event.events = EPOLLIN|EPOLLOUT | EPOLLET | EPOLLRDHUP;
-                epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event);   
+                event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+                if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
+                    printf("epoll_ctl add failed %d efd:%d\n", cid, efd);  
             }else if(evs[i].events & EPOLLOUT){
                 int fd = evs[i].data.fd;
                 write(fd, "111", 3);
@@ -91,7 +102,7 @@ static void* thread_work(void *arg)
 
 
 
-thread_pool* initThreadPool(int cnt,  void* func)
+ThreadPool* initThreadPool(int cnt,  void* func)
 {
     if(cnt <= 0)
         return NULL;
@@ -99,12 +110,12 @@ thread_pool* initThreadPool(int cnt,  void* func)
     if(func == NULL)
         func = thread_work;
 
-    thread_pool *pool = (thread_pool *)malloc(sizeof(thread_pool));
-    pool->threads = (thread_info **)malloc(sizeof(void*)*cnt);
+    ThreadPool *pool = (ThreadPool *)malloc(sizeof(ThreadPool));
+    pool->threads = (ThreadInfo **)malloc(sizeof(void*)*cnt);
 
     for(int i = 0; i < cnt; i++)
     {
-        thread_info *info = (thread_info *)malloc(sizeof(thread_info));
+        ThreadInfo *info = (ThreadInfo *)malloc(sizeof(ThreadInfo));
         info->target = i;
         pipe(info->pipefd);
         pool->threads[i] = info;
@@ -117,7 +128,7 @@ thread_pool* initThreadPool(int cnt,  void* func)
     return pool;
 }
 
-void destoryThreadPool(thread_pool *pool)
+void destoryThreadPool(ThreadPool *pool)
 {
     if(pool == NULL || pool->threads == NULL)
         return;
@@ -132,12 +143,12 @@ void destoryThreadPool(thread_pool *pool)
     pool->threads = NULL;
 }
 
-void notifyThread(thread_pool *pool, void * var)
+void notifyThread(ThreadPool *pool, void * var)
 {
     if(pool == NULL || var == NULL)
         return;
 
-    notify_info *info = (notify_info*)var;
+    NotifyInfo *info = (NotifyInfo*)var;
     int index = info->index;
       
     char cid [16] = {0};
@@ -147,7 +158,7 @@ void notifyThread(thread_pool *pool, void * var)
 
 #define EPOLL_EVENT_CNT 16
 
-void netframework_loop(thread_pool* pool, int *fds, int fd_cnt)
+void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
 {
     if(pool == NULL || fds == NULL){
         printf("thread pool or fds is NULL \n");
@@ -172,7 +183,6 @@ void netframework_loop(thread_pool* pool, int *fds, int fd_cnt)
             int i = 0;
             for(; i < nfds; i++)
             {
-                //if(evs[i].events & EPOLLIN && evs[i].data.fd  == fd){
                 if(evs[i].events & EPOLLIN){
                     client_sockfd = accept(evs[i].data.fd, NULL, NULL);
                     char cid [16] = {0};
@@ -181,8 +191,8 @@ void netframework_loop(thread_pool* pool, int *fds, int fd_cnt)
                     if(thread_cnt > 0)
                         index = c_ids++ % thread_cnt;
 
-                    if(pool)
-                        write(pool->threads[index]->pipefd[1], cid, strlen(cid));
+
+                    write(pool->threads[index]->pipefd[1], cid, strlen(cid));
 
                     printf("===> accept fd:%d  thread index:%d\n", client_sockfd, index);
 
@@ -192,7 +202,7 @@ void netframework_loop(thread_pool* pool, int *fds, int fd_cnt)
     }    
 }
 
-int init_address(const char * addr, unsigned int port)
+int init_address(const char* addr, unsigned int port)
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(sockfd < 0)

@@ -19,24 +19,27 @@ typedef unsigned long   uint64_t;
 #define lengthof(array) (sizeof (array) / sizeof ((array)[0]))
 
 
-typedef struct thread_info{
+typedef struct ThreadInfo{
     pthread_t tid;
     int target;
     int pipefd[2];
     unsigned char flags;
-    void (*thread_hander) (struct thread_info *thread_var, char *, int len);
-} thread_info;
+    void (*thread_hander) (struct ThreadInfo *thread_var, char *, int len);
+} ThreadInfo;
 
 
-typedef struct thread_pool{
-    thread_info **threads;
+typedef struct ThreadPool{
+    ThreadInfo **threads;
     int size;
-}thread_pool;
+}ThreadPool;
 
-typedef struct notify_info{
+typedef struct NotifyInfo{
     int index;
     unsigned int cid;
-}notify_info;
+}NotifyInfo;
 
+struct connect_option{
+    unsigned int fd;
+}connect_option;
 
 #endif // DATATYPE_H

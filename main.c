@@ -2,14 +2,14 @@
 #include<unistd.h>
 #include<assert.h>
 #include<signal.h>
-#include<execinfo.h>
+//#include<execinfo.h>
 #include<error.h>
 
 
 #include <sys/prctl.h>
 #include <stdlib.h>
 #include <sched.h>
-#include <sys/mman.h>
+//#include <sys/mman.h>
 #include <sys/ipc.h>
 
 
@@ -20,7 +20,7 @@
 
 #include<stdio.h>
 
-#include <immintrin.h>
+//#include <immintrin.h>
 
 
 #include <sys/user.h>
@@ -38,19 +38,7 @@ void signal_handler(int sig)
     exit(0);
 }
 
-void signal_child(int sig){
-    wait(NULL);
-}
-
-
-
-int sockfd;
-
-
-
-
-
-int  main(int argc, char **argv)
+int main(void)
 {
     if(!lockSingleInstance("./lock")){
         printf("already start \n");
@@ -63,7 +51,7 @@ int  main(int argc, char **argv)
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    thread_pool *pool = initThreadPool(5, NULL);
+    ThreadPool *pool = initThreadPool(5, NULL);
    
 
     int fds[2];
