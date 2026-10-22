@@ -1,22 +1,27 @@
 PWD := $(shell pwd)
 
-USER_CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra
+USER_CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Wl,-rpath,./
 #USER_CFLAGS ?= -O1 -g  -Wall -Wextra -fsanitize=thread
 
 .PHONY:  user clean
 
-NETWORKFRAME = libnetframe.so
+NETWORKFRAME = libnet
 
 all:  user
 
-user: net_work
+user: NETWORKFRAME net_work
 
-net_work: main.c  util-hash.c  util-hash.h  datatype.h siphash.h  util.h util.c networkframe.c networkframe.h rpc.h rpc.c
-	$(CC) $(USER_CFLAGS)  -o $@ main.c util.c util-hash.c networkframe.c rpc.c -lpthread
+SO_SOURCE = networkframe.c util.c rpc.c util-hash.c
+NETWORKFRAME : $(SO_SOURCE)
+	$(CC) -fPIC -shared -o libnet.so  $^
 
-NETWORKFRAME : networkframe.c util.c
-	$(CC) -fPIC -shared -o   $@ $^
+NET_SOURCE = main.c
+NET_INCLUDE = util-hash.h  datatype.h siphash.h  util.h  networkframe.h rpc.h
+
+net_work: $(NET_SOURCE) $(NET_INCLUDE)
+	$(CC) $(USER_CFLAGS)  -o $@ $^  -L./ -lnet -lpthread
+
 
 
 clean:
-	$(RM) net_work
+	$(RM) net_work libnet.so
