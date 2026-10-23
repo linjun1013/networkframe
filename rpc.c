@@ -1,14 +1,16 @@
 #include<stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/sdt.h>
+
 #include"rpc.h"
 
 void registCmd(const unsigned int cmd, cmd_hander func)
 {
-   if(cmd == 0 || func == NULL)
+   if(cmd == RPC_CMD_UNKNOW || func == NULL)
         return;
 
-   if(cmd > MAX_CMD_CNT || cmd == MAX_CMD_CNT)
+   if(cmd > RPC_CMD_MAX || cmd == RPC_CMD_MAX)
         return;
     
     if(rpcCmdArray[cmd] != NULL){
@@ -25,7 +27,7 @@ void registCmd(const unsigned int cmd, cmd_hander func)
 
 void unregistCmd(const unsigned int cmd)
 {
-    if(cmd == 0 || cmd > MAX_CMD_CNT || cmd == MAX_CMD_CNT)
+    if(cmd == RPC_CMD_UNKNOW || cmd > RPC_CMD_MAX || cmd == RPC_CMD_MAX)
         return;
 
     if(rpcCmdArray[cmd]){
@@ -35,13 +37,13 @@ void unregistCmd(const unsigned int cmd)
 
 }
 
-// cmdtype + param len + param
+//cmdtype + param len + param
 
 unsigned int parseRpcCmd(const char * msg, const unsigned int len, char **param, int *param_len)
 {
-    if(msg == NULL || len == 0)
+    if(msg == NULL || len < RPC_CMD_HEAD_LEN)
         return 0;
-    
+
     int cmd_type = 0;
     char * pos = strchr(msg, '_');
     if(pos){
@@ -57,8 +59,28 @@ unsigned int parseRpcCmd(const char * msg, const unsigned int len, char **param,
         char *pos = strchr(pos, '_');
         *param = pos;
         int head_len = pos - msg;
-        *param_len = len - head_len;     
+        *param_len = len - head_len;
     }
 
     return cmd_type;
 }
+
+
+static void probeExecRpcCmd(void * arg, int var)
+{
+     DTRACE_PROBE2(rpc, execRpcCmd, arg, var);
+}
+
+void* execRpcCmd(const int cmd, char* param, int param_len)
+{
+   probeExecRpcCmd(param, cmd);
+   void* ret = NULL;
+   if(cmd > RPC_CMD_UNKNOW && cmd < RPC_CMD_MAX){
+        if(rpcCmdArray[cmd] && rpcCmdArray[cmd]->func){
+            ret = rpcCmdArray[cmd]->func(param, param_len);
+        }
+   }
+
+   return ret;
+}
+

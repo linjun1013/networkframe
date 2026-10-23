@@ -24,8 +24,8 @@ typedef struct ThreadInfo{
     int target;
     int pipefd[2];
     unsigned char flags;
-    HashTable* fd_bufhash;
-    void*   private;
+    HashTable* bufhash;
+    void* data;
     void (*thread_hander) (struct ThreadInfo *thread_var, char *, int len);
 } ThreadInfo;
 
@@ -40,14 +40,16 @@ typedef struct NotifyInfo{
     unsigned int cid;
 }NotifyInfo;
 
-typedef struct connect_option{
+typedef struct ConInfo{
+    unsigned int cip;
     unsigned int fd;
-}connect_option;
+}ConInfo;
+
 
 
 typedef struct FdBuff{
-    int fd;
-    char fixbuf[1024];
+    ConInfo con;
+    char fixbuf[512];
     void *extbuf;
     int ext_len;
 }FdBuff;

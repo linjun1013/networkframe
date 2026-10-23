@@ -58,15 +58,18 @@ static void* thread_work(void *arg)
             if(((evs[i].events & EPOLLIN) && evs[i].data.fd != pipefd)){
                 int fd = evs[i].data.fd;
                 int len = 0, ret = 0;
-                //FdBuff *fdbuf = (FdBuff *) HashTableLookup(info->fd_bufhash, &fd, sizeof(fd));
+                //ConInfo con;
+                //con.fd = fd;
+
+                //FdBuff *fdbuf = (FdBuff *) HashTableLookup(info->fd_bufhash, &con, sizeof(con));
                 //char *msg = fdbuff->fixbuf;
                 //int max_mag_len = 1024;
                 //if(fdbuff->extbuf){
                 //    msg = extbuf;
                 //    max_mag_len = ext_len;
                 //}
-                    
-                
+
+               // fd --> flow ---> cip
                 while((len < 1024) && (ret = read(fd, msg+len, 1024))) {
                     if(ret > 0)
                         len += ret;
@@ -86,12 +89,8 @@ static void* thread_work(void *arg)
                 }else if(len){
                     char * param;
                     int param_len;
-                     unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len); 
-                     if(cmd_type > 0 && cmd_type < MAX_CMD_CNT){
-                        if(rpcCmdArray[cmd_type] && rpcCmdArray[cmd_type]->func){
-                            rpcCmdArray[cmd_type]->func(info, param, param_len);
-                        }
-                     }
+                     unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len);
+                     execRpcCmd(cmd_type, param, param_len);
                      write(fd, msg, len);
                 }
                 
@@ -101,7 +100,7 @@ static void* thread_work(void *arg)
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
                 read(pipefd, buff, sizeof(buff));
                 int cid = atoi(buff);
-                printf(" ==> get a new connect %d pipe:%d\n", cid, pipefd);
+                printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
                 int flags = fcntl(cid, F_GETFL, 0);
                 fcntl(cid, F_SETFL, flags | O_NONBLOCK);
                 
@@ -139,6 +138,46 @@ void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set)
     }
 }
 
+static uint32_t bufHash(HashTable *ht, void *data, uint16_t datalen)
+{
+    FdBuff *buf = (FdBuff*)data;
+
+    unsigned long long hash = ((unsigned long long)buf->con.cip << 32) | buf->con.fd;
+    
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
+    hash *= 0xc4ceb9fe1a85ec53ULL;
+    hash ^= hash >> 33;
+    hash = (unsigned int)(hash ^ (hash >> 32)); 
+    hash %= ht->array_size;
+
+
+    return hash;
+}
+
+static char bufHashCompare(void *data1, uint16_t len1, void *data2, uint16_t len2)
+{
+    ConInfo *con1 = &(((FdBuff *)data1)->con);
+    ConInfo *con2 = (ConInfo*)data2;
+
+    if(con1->cip == con2->cip && con1->fd == con2->fd)
+        return 1;
+
+    return 0;   
+}
+
+static void bufHashFree(void *data)
+{
+    if(data == NULL)
+        return;
+    FdBuff *buf = (FdBuff*)data;
+    if(buf->extbuf)
+        free(buf->extbuf);
+    buf->extbuf = NULL;
+    buf->ext_len = 0;
+}
+
 
 ThreadPool* initThreadPool(int cnt,  void* func)
 {
@@ -156,6 +195,8 @@ ThreadPool* initThreadPool(int cnt,  void* func)
         ThreadInfo *info = (ThreadInfo *)malloc(sizeof(ThreadInfo));
         info->target = i;
         pipe(info->pipefd);
+
+        info->bufhash = HashTableInit(16, bufHash, bufHashCompare, bufHashFree);
         pool->threads[i] = info;
                                     
         printf("===== i:%d \n", i);
@@ -174,6 +215,7 @@ void destoryThreadPool(ThreadPool *pool)
     for(int i = 0; i< pool->size; i++){
         close(pool->threads[i]->pipefd[0]);
         close(pool->threads[i]->pipefd[1]);
+        HashTableFree(pool->threads[i]->bufhash);
         free(pool->threads[i]);
     }
 
@@ -229,9 +271,17 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
                     int index = 0;
                     if(thread_cnt > 0)
                         index = c_ids++ % thread_cnt;
-                    // hash(client_sockfd , index) 
-                    write(pool->threads[index]->pipefd[1], cid, strlen(cid));
+                    ThreadInfo *info = pool->threads[index];
+                    FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
+                    buf->con.fd = client_sockfd;
 
+                    struct sockaddr_in client_addr;
+                    socklen_t addr_len = sizeof(client_addr);
+                    getpeername(client_sockfd, (struct sockaddr *)&client_addr, &addr_len);
+                    buf->con.cip = client_addr.sin_addr.s_addr;
+
+                    HashTableAdd(info->bufhash, buf, sizeof(buf));
+                    write(pool->threads[index]->pipefd[1], cid, strlen(cid));
                     printf("===> accept fd:%d  thread index:%d\n", client_sockfd, index);
 
                 }
