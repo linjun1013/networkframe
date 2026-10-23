@@ -10,6 +10,8 @@
 
 #include<fcntl.h>
 #include<errno.h>
+#include<signal.h>
+
 
 #include"networkframe.h"
 #include"rpc.h"
@@ -102,9 +104,8 @@ static void* thread_work(void *arg)
                     free(con);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
-                char buff[32] = {0};
-                read(pipefd, buff, sizeof(buff));
-                unsigned long cip_fd = atol(buff);
+                unsigned long cip_fd = 0;
+                read(pipefd, &cip_fd, sizeof(cip_fd));
                 int cip = cip_fd >> 32;
                 unsigned int cid = (cip_fd & 0x00000000ffffffff);
                 printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
@@ -190,6 +191,26 @@ static void bufHashFree(void *data)
     buf->ext_len = 0;
 }
 
+static void signal_handler(int sig)
+{
+    printf("cache signal %d, exit\n", sig);
+    exit(0);
+}
+
+void initEnv(void)
+{
+
+#ifdef CONFIG_INSTANCE
+    if(!lockSingleInstance("./lock")){
+        printf("already start \n");
+        exit(-1);
+    }
+#endif
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    
+}
 
 ThreadPool* initThreadPool(int cnt,  void* func)
 {
@@ -257,7 +278,6 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
         return;
     }
 
-
     int efd = epoll_create(256);
     struct epoll_event event;
     int pos = 0;
@@ -265,7 +285,7 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
         event.data.fd = fds[pos];
         event.events = EPOLLIN | EPOLLET;
         epoll_ctl(efd, EPOLL_CTL_ADD, fds[pos], &event);
-     }
+    }
     struct epoll_event evs[EPOLL_EVENT_CNT];
     int client_sockfd = 0;
     static unsigned int c_ids = 0;
@@ -278,10 +298,10 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
             {
                 if(evs[i].events & EPOLLIN){
                     client_sockfd = accept(evs[i].data.fd, NULL, NULL);
-                    char data [32] = {0};
                     int index = 0;
-                    if(thread_cnt > 0)
+                    if(likely(thread_cnt > 0))
                         index = c_ids++ % thread_cnt;
+
                     ThreadInfo *info = pool->threads[index];
                     FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
                     buf->con.fd = client_sockfd;
@@ -290,15 +310,12 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
                     socklen_t addr_len = sizeof(client_addr);
                     getpeername(client_sockfd, (struct sockaddr *)&client_addr, &addr_len);
                     buf->con.cip = client_addr.sin_addr.s_addr;
+                    HashTableAdd(info->bufhash, buf, sizeof(buf));
 
                     unsigned long ip_fd = ((unsigned long)buf->con.cip << 32);
                     ip_fd = ip_fd | client_sockfd;
+                    write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
 
-                    snprintf(data, 32, "%lu", ip_fd);
-
-
-                    HashTableAdd(info->bufhash, buf, sizeof(buf));
-                    write(pool->threads[index]->pipefd[1], data, strlen(data));
 #ifdef NETWORK_DEBUG
                     printf("===> accept fd:%d  thread index:%d, ip_fd:%lu\n", client_sockfd, index, ip_fd);
 #endif

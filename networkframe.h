@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+void initEnv(void);
+
 ThreadPool* initThreadPool(int cnt, void* func);
 
 void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set);
