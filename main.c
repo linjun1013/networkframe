@@ -31,16 +31,15 @@ int main(void)
     initEnv();
     ThreadPool *pool = initThreadPool(5, NULL);
 
-    int fds[2];
+    ListenInfo* fds[2];
     int fd_cnt = 0;
-    fds[0] = init_address(NULL , 1234);
+    fds[0] = init_address(NULL , 1234, 0);
     fd_cnt++;
 
 #ifdef CONFIG_IPV6_ENBALE
-    fds[1] = init_address_v6(NULL, 1235);
+    fds[1] = init_address_v6(NULL, 1235, 0);
     fd_cnt++;
-
-#endif    
+#endif 
 
     netframework_loop(pool, fds, fd_cnt);
     if(pool){

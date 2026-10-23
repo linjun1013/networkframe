@@ -19,12 +19,11 @@ void destoryThreadPool(ThreadPool* pool);
 void notifyThread(ThreadPool* pool, void* var);
 
 
-int init_address(const char* addr, unsigned int port);
-int init_address_v6(const char* addr, unsigned int port);
+ListenInfo* init_address(const char* addr, unsigned int port, uint8_t ssl);
+ListenInfo* init_address_v6(const char* addr, unsigned int port, uint8_t ssl);
 
 
-
-void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt);
+void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt);
 
 
 

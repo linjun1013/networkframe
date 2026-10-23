@@ -40,6 +40,11 @@ typedef struct NotifyInfo{
     unsigned int cid;
 }NotifyInfo;
 
+typedef struct ListenInfo{
+    int fd;
+    uint8_t ssl;
+}ListenInfo;
+
 typedef struct ConInfo{
     unsigned int cip;
     unsigned int fd;

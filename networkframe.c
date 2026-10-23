@@ -162,9 +162,8 @@ static uint32_t bufHash(HashTable *ht, void *data, uint16_t datalen)
     hash ^= hash >> 33;
     hash *= 0xc4ceb9fe1a85ec53ULL;
     hash ^= hash >> 33;
-    hash = (unsigned int)(hash ^ (hash >> 32)); 
+    hash = (unsigned int)(hash ^ (hash >> 32));
     hash %= ht->array_size;
-
 
     return hash;
 }
@@ -271,21 +270,23 @@ void notifyThread(ThreadPool *pool, void * var)
 
 #define EPOLL_EVENT_CNT 16
 
-void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
+void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
 {
-    if(pool == NULL || fds == NULL){
+    if(pool == NULL || infos == NULL){
         printf("thread pool or fds is NULL \n");
         return;
     }
 
     int efd = epoll_create(256);
     struct epoll_event event;
-    int pos = 0;
-    for(; pos < fd_cnt; pos++){
-        event.data.fd = fds[pos];
-        event.events = EPOLLIN | EPOLLET;
-        epoll_ctl(efd, EPOLL_CTL_ADD, fds[pos], &event);
+
+    for(int pos = 0; pos < fd_cnt; pos++){
+        ListenInfo *listen_info = infos[pos];
+        event.data.ptr = listen_info;
+        event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
+        epoll_ctl(efd, EPOLL_CTL_ADD, listen_info->fd, &event);
     }
+
     struct epoll_event evs[EPOLL_EVENT_CNT];
     int client_sockfd = 0;
     static unsigned int c_ids = 0;
@@ -297,7 +298,8 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
             for(; i < nfds; i++)
             {
                 if(evs[i].events & EPOLLIN){
-                    client_sockfd = accept(evs[i].data.fd, NULL, NULL);
+                    ListenInfo *list_info = (ListenInfo *)evs[i].data.ptr;
+                    client_sockfd = accept(list_info->fd, NULL, NULL);
                     int index = 0;
                     if(likely(thread_cnt > 0))
                         index = c_ids++ % thread_cnt;
@@ -314,22 +316,33 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
 
                     unsigned long ip_fd = ((unsigned long)buf->con.cip << 32);
                     ip_fd = ip_fd | client_sockfd;
+
                     write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
+
+                    uint8_t ssl_flag = 0;
+                    if(list_info->ssl){
+                        ssl_flag = 1;
+                    }
+                    write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
 
 #ifdef NETWORK_DEBUG
                     printf("===> accept fd:%d  thread index:%d, ip_fd:%lu\n", client_sockfd, index, ip_fd);
 #endif
+                }else if(evs[i].events & (EPOLLHUP | EPOLLERR)){
+                    ListenInfo *info = (ListenInfo *)evs[i].data.ptr;
+                    epoll_ctl(efd, EPOLL_CTL_DEL, info->fd, NULL);
+                    free(info);
                 }
             }
         }
     }
 }
 
-int init_address(const char* addr, unsigned int port)
+ListenInfo * init_address(const char* addr, unsigned int port, uint8_t ssl)
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(sockfd < 0)
-        return 0;
+        return NULL;
     
     int optval = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
@@ -344,14 +357,18 @@ int init_address(const char* addr, unsigned int port)
 
     if(listen(sockfd, 256) != 0){
         printf("listen fd %d failed exit\n", sockfd);
-        return 0;
+        return NULL;
     }
 
-    return sockfd;
+    ListenInfo *info = (ListenInfo*)malloc(sizeof(ListenInfo));
+    info->fd = sockfd;
+    info->ssl = ssl;
+
+    return info;
 }
 
 
-int init_address_v6(const char * addr, unsigned int port)
+ListenInfo* init_address_v6(const char * addr, unsigned int port, uint8_t ssl)
 {
     int sockfd_v6 = socket(AF_INET6, SOCK_STREAM, 0);
     int optval = 1;
@@ -359,6 +376,7 @@ int init_address_v6(const char * addr, unsigned int port)
     setsockopt(sockfd_v6, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
     setsockopt(sockfd_v6, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
     int v6only = 1;
+
     setsockopt(sockfd_v6, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
     struct sockaddr_in6 sa = {0};
     sa.sin6_family = AF_INET6;
@@ -366,7 +384,11 @@ int init_address_v6(const char * addr, unsigned int port)
     sa.sin6_addr = in6addr_any;
     bind(sockfd_v6, (struct sockaddr *)&sa, sizeof(sa));
     listen(sockfd_v6, 256);
+
+    ListenInfo *info = (ListenInfo*)malloc(sizeof(ListenInfo));
+    info->fd = sockfd_v6;
+    info->ssl = ssl;
  
-    return sockfd_v6;
+    return info;
 }
 
