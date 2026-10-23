@@ -9,6 +9,7 @@
 
 
 #include<fcntl.h>
+#include<errno.h>
 
 #include"networkframe.h"
 #include"rpc.h"
@@ -42,48 +43,49 @@ static void* thread_work(void *arg)
     int pipefd = info->pipefd[0];
     void  (*fun_ptr)(ThreadInfo * var, char *, int len) = info->thread_hander;
 
-    char buff[16] = {0};
-    char msg[1024] = {0};
     int efd = epoll_create(16);
     struct epoll_event event;
     event.data.fd = pipefd;
     event.events = EPOLLIN;
     epoll_ctl(efd, EPOLL_CTL_ADD, pipefd, &event);
     struct epoll_event evs[16];
-    // <fd, buff>
+
     while(1){
         int nfds = epoll_wait(efd, evs, 16, -1);
         for(int i = 0; i < nfds; i++)
         {
             if(((evs[i].events & EPOLLIN) && evs[i].data.fd != pipefd)){
-                int fd = evs[i].data.fd;
+                ConInfo *con = (ConInfo*)evs[i].data.ptr;
+                int fd = con->fd;
                 int len = 0, ret = 0;
-                //ConInfo con;
-                //con.fd = fd;
+                
+                FdBuff *fdbuf = (FdBuff *)HashTableLookup(info->bufhash, con, sizeof(con));
+                if(fdbuf == NULL){
+                    printf("get fd buf failed %d\n", fd);
+                    continue;
+                }
 
-                //FdBuff *fdbuf = (FdBuff *) HashTableLookup(info->fd_bufhash, &con, sizeof(con));
-                //char *msg = fdbuff->fixbuf;
-                //int max_mag_len = 1024;
-                //if(fdbuff->extbuf){
-                //    msg = extbuf;
-                //    max_mag_len = ext_len;
-                //}
-
-               // fd --> flow ---> cip
-                while((len < 1024) && (ret = read(fd, msg+len, 1024))) {
+                char *msg = fdbuf->fixbuf;
+                int max_msg_len = 512;
+                if(fdbuf->extbuf){
+                    msg = fdbuf->extbuf;
+                    max_msg_len = fdbuf->ext_len;
+                }
+                                    
+                while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
                     if(ret > 0)
                         len += ret;
                     else
                         break;
                 }
 
-                if(len < 1024)
+                if(len < max_msg_len)
                     msg[len] = 0;
                 else
-                    msg[1023] = 0;
+                    msg[ max_msg_len - 1] = 0;
                 
                 peobeRead(msg);
-                printf(" ==> get a new read %d  len:%d\n", fd, len);
+                printf(" ==> get a new read %d  len:%d , msg:%p\n", fd, len, msg);
                 if(unlikely(fun_ptr)){
                     fun_ptr((ThreadInfo *)arg, msg, len);
                 }else if(len){
@@ -94,29 +96,39 @@ static void* thread_work(void *arg)
                      write(fd, msg, len);
                 }
                 
-                if(len == 0){
-                
+                if((ret == 0) || (ret < 0 && errno != EAGAIN)){
+                    epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
+                    close(fd);
+                    free(con);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
+                char buff[32] = {0};
                 read(pipefd, buff, sizeof(buff));
-                int cid = atoi(buff);
+                unsigned long cip_fd = atol(buff);
+                int cip = cip_fd >> 32;
+                unsigned int cid = (cip_fd & 0x00000000ffffffff);
                 printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
                 int flags = fcntl(cid, F_GETFL, 0);
                 fcntl(cid, F_SETFL, flags | O_NONBLOCK);
                 
+                ConInfo *con = (ConInfo *)malloc(sizeof(ConInfo));
+                con->cip = cip;
+                con->fd = cid;
 
                 struct epoll_event event;
-                event.data.fd = cid;
-                event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+                event.data.ptr = con;
+                event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
                 if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
                     printf("epoll_ctl add failed %d efd:%d\n", cid, efd);  
             }else if(evs[i].events & EPOLLOUT){
-                int fd = evs[i].data.fd;
-                write(fd, "111", 3);
-            }else if(evs[i].events & EPOLLRDHUP){
-                int fd = evs[i].data.fd;
+                //int fd = evs[i].data.fd;
+                //write(fd, "111", 3);
+            }else if(evs[i].events & (EPOLLHUP | EPOLLERR) && (evs[i].data.fd != pipefd)){
+                ConInfo *con = (ConInfo*)evs[i].data.ptr;
+                int fd = con->fd;
+                epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
                 close(fd);
-                printf("close  connect %d\n", fd);
+                free(con);
             }
         }
     }
@@ -198,7 +210,7 @@ ThreadPool* initThreadPool(int cnt,  void* func)
 
         info->bufhash = HashTableInit(16, bufHash, bufHashCompare, bufHashFree);
         pool->threads[i] = info;
-                                    
+
         printf("===== i:%d \n", i);
         pthread_create(&(info->tid), NULL, func, info);
         pthread_detach(info->tid);
@@ -266,8 +278,7 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
             {
                 if(evs[i].events & EPOLLIN){
                     client_sockfd = accept(evs[i].data.fd, NULL, NULL);
-                    char cid [16] = {0};
-                    snprintf(cid, 16, "%d", client_sockfd);
+                    char data [32] = {0};
                     int index = 0;
                     if(thread_cnt > 0)
                         index = c_ids++ % thread_cnt;
@@ -280,14 +291,21 @@ void netframework_loop(ThreadPool* pool, int* fds, int fd_cnt)
                     getpeername(client_sockfd, (struct sockaddr *)&client_addr, &addr_len);
                     buf->con.cip = client_addr.sin_addr.s_addr;
 
-                    HashTableAdd(info->bufhash, buf, sizeof(buf));
-                    write(pool->threads[index]->pipefd[1], cid, strlen(cid));
-                    printf("===> accept fd:%d  thread index:%d\n", client_sockfd, index);
+                    unsigned long ip_fd = ((unsigned long)buf->con.cip << 32);
+                    ip_fd = ip_fd | client_sockfd;
 
+                    snprintf(data, 32, "%lu", ip_fd);
+
+
+                    HashTableAdd(info->bufhash, buf, sizeof(buf));
+                    write(pool->threads[index]->pipefd[1], data, strlen(data));
+#ifdef NETWORK_DEBUG
+                    printf("===> accept fd:%d  thread index:%d, ip_fd:%lu\n", client_sockfd, index, ip_fd);
+#endif
                 }
             }
-        }           
-    }    
+        }
+    }
 }
 
 int init_address(const char* addr, unsigned int port)
