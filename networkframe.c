@@ -132,6 +132,7 @@ static void* thread_work(void *arg)
                     if(con->ssl)
                         SSL_CTX_free(con->ssl);
 #endif
+                    HashTableRemove(info->bufhash, con, sizeof(con));
                     free(con);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
@@ -183,6 +184,7 @@ static void* thread_work(void *arg)
                 if(con->ssl)
                     SSL_CTX_free(con->ssl);
 #endif
+                HashTableRemove(info->bufhash, con, sizeof(con));
                 free(con);
             }
         }
@@ -241,8 +243,8 @@ static void bufHashFree(void *data)
     FdBuff *buf = (FdBuff*)data;
     if(buf->extbuf)
         free(buf->extbuf);
-    buf->extbuf = NULL;
-    buf->ext_len = 0;
+
+    free(buf);
 }
 
 static void signal_handler(int sig)

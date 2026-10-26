@@ -65,6 +65,7 @@ typedef struct FdBuff{
     char fixbuf[512];
     void *extbuf;
     int ext_len;
+    FdBuff *next;
 }FdBuff;
 
 
