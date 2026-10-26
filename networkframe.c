@@ -1,4 +1,3 @@
-
 #include<string.h>
 #include<unistd.h>
 #include<stdio.h>
@@ -13,24 +12,39 @@
 #include<signal.h>
 
 
+#ifdef CONFIG_SSL
+#include <openssl/err.h>
+#endif
+
 #include"networkframe.h"
 #include"rpc.h"
 
 #include <sys/sdt.h>
 
+#ifdef CONFIG_SSL
+SSL_CTX *ssl_ctx;
+#endif
 
-
-
-void probeThread(void * arg, int var)
+static void probeThread(void * arg, int var)
 {
     DTRACE_PROBE2(network, thread, arg, var);   
 }
 
-void peobeRead(void *arg)
+static void peobeRead(void *arg)
 {
     DTRACE_PROBE1(network, read, arg);
 }
-    
+
+#define ADD_READ_LEN(len, ret) \
+if(ret > 0 ) \
+    len += ret; \
+else \
+    break; \
+
+
+
+
+
 static void* thread_work(void *arg)
 {
     ThreadInfo *info = (ThreadInfo *)arg;
@@ -73,13 +87,24 @@ static void* thread_work(void *arg)
                     msg = fdbuf->extbuf;
                     max_msg_len = fdbuf->ext_len;
                 }
-                                    
-                while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
-                    if(ret > 0)
-                        len += ret;
-                    else
-                        break;
+                
+#ifdef CONFIG_SSL
+                if(con->ssl){
+                    while (len < max_msg_len &&(ret = SSL_read(con->ssl, msg+len, max_msg_len)) > 0){
+                        ADD_READ_LEN(len, ret)
+                    }    
+                }else{
+                    while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
+                        ADD_READ_LEN(len, ret)
+                    }
                 }
+#else
+                if(fd > 0){
+                    while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
+                        ADD_READ_LEN(len, ret)
+                    }
+                }
+#endif
 
                 if(len < max_msg_len)
                     msg[len] = 0;
@@ -87,25 +112,35 @@ static void* thread_work(void *arg)
                     msg[ max_msg_len - 1] = 0;
                 
                 peobeRead(msg);
-                printf(" ==> get a new read %d  len:%d , msg:%p\n", fd, len, msg);
+                printf(" ==> get a new read from  %d  len:%d , msg:%p\n", fd, len, msg);
                 if(unlikely(fun_ptr)){
                     fun_ptr((ThreadInfo *)arg, msg, len);
                 }else if(len){
                     char * param;
                     int param_len;
-                     unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len);
-                     execRpcCmd(cmd_type, param, param_len);
-                     write(fd, msg, len);
+                    unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len);
+                    execRpcCmd(cmd_type, param, param_len);
+                    write(fd, msg, len);
                 }
                 
                 if((ret == 0) || (ret < 0 && errno != EAGAIN)){
                     epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
                     close(fd);
+#ifdef CONFIG_SSL
+                    if(con->ssl)
+                        SSL_CTX_free(con->ssl);
+#endif
                     free(con);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
                 unsigned long cip_fd = 0;
                 read(pipefd, &cip_fd, sizeof(cip_fd));
+
+#ifdef CONFIG_SSL
+                uint8_t ssl_flag = 0;
+                read(pipefd, &ssl_flag, sizeof(ssl_flag));
+#endif
+
                 int cip = cip_fd >> 32;
                 unsigned int cid = (cip_fd & 0x00000000ffffffff);
                 printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
@@ -115,12 +150,25 @@ static void* thread_work(void *arg)
                 ConInfo *con = (ConInfo *)malloc(sizeof(ConInfo));
                 con->cip = cip;
                 con->fd = cid;
+#ifdef CONFIG_SSL
+                if(ssl_flag){
+                    con->ssl = SSL_new(ssl_ctx);
+                    SSL_set_fd(con->ssl, cid);
+                    if (SSL_accept(con->ssl) <= 0) {
+                        printf("SSL_accept n", cid, efd);
+                        SSL_free(con->ssl);
+                        close(cid);
+                        free(con);
+                        continue;
+                    }
+                }
 
+#endif
                 struct epoll_event event;
                 event.data.ptr = con;
                 event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
                 if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
-                    printf("epoll_ctl add failed %d efd:%d\n", cid, efd);  
+                    printf("epoll_ctl add failed %d efd:%d\n", cid, efd);
             }else if(evs[i].events & EPOLLOUT){
                 //int fd = evs[i].data.fd;
                 //write(fd, "111", 3);
@@ -129,6 +177,10 @@ static void* thread_work(void *arg)
                 int fd = con->fd;
                 epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
                 close(fd);
+#ifdef CONFIG_SSL
+                if(con->ssl)
+                    SSL_CTX_free(con->ssl);
+#endif
                 free(con);
             }
         }
@@ -183,6 +235,7 @@ static void bufHashFree(void *data)
 {
     if(data == NULL)
         return;
+
     FdBuff *buf = (FdBuff*)data;
     if(buf->extbuf)
         free(buf->extbuf);
@@ -206,9 +259,16 @@ void initEnv(void)
     }
 #endif
 
+#ifdef CONFIG_SSL
+    SSL_library_init();
+    SSL_load_error_strings();
+    SSLeay_add_ssl_algorithms();
+    
+    ssl_ctx = SSL_CTX_new(SSLv23_server_method());
+#endif
+
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    
 }
 
 ThreadPool* initThreadPool(int cnt,  void* func)
@@ -221,10 +281,12 @@ ThreadPool* initThreadPool(int cnt,  void* func)
 
     ThreadPool *pool = (ThreadPool *)malloc(sizeof(ThreadPool));
     pool->threads = (ThreadInfo **)malloc(sizeof(void*)*cnt);
+    pool->size = cnt;
 
     for(int i = 0; i < cnt; i++)
     {
         ThreadInfo *info = (ThreadInfo *)malloc(sizeof(ThreadInfo));
+        memset(info, 0, sizeof(ThreadInfo));
         info->target = i;
         pipe(info->pipefd);
 
@@ -253,6 +315,7 @@ void destoryThreadPool(ThreadPool *pool)
 
     free(pool->threads);
     pool->threads = NULL;
+    pool->size = 0;
 }
 
 void notifyThread(ThreadPool *pool, void * var)
@@ -306,6 +369,7 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
 
                     ThreadInfo *info = pool->threads[index];
                     FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
+                    memset(buf, 0, sizeof(FdBuff));
                     buf->con.fd = client_sockfd;
 
                     struct sockaddr_in client_addr;
@@ -318,12 +382,13 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
                     ip_fd = ip_fd | client_sockfd;
 
                     write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
-
+#ifdef CONFIG_SSL
                     uint8_t ssl_flag = 0;
                     if(list_info->ssl){
                         ssl_flag = 1;
                     }
                     write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
+#endif
 
 #ifdef NETWORK_DEBUG
                     printf("===> accept fd:%d  thread index:%d, ip_fd:%lu\n", client_sockfd, index, ip_fd);

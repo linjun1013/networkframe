@@ -4,6 +4,11 @@
  #define DATATYPE_H
 
 #include<pthread.h>
+
+#ifdef CONFIG_SSL
+#include <openssl/ssl.h>
+#endif
+
 #include"util-hash.h"
 
 #ifdef __cplusplus
@@ -16,7 +21,7 @@ extern "C" {
 
 #define OFFSET(type, field)   ((long) &((type *)0)->field)
 
-#define lengthof(array) (sizeof (array) / sizeof ((array)[0]))
+#define LENGTHOF(array) (sizeof (array) / sizeof ((array)[0]))
 
 
 typedef struct ThreadInfo{
@@ -48,6 +53,9 @@ typedef struct ListenInfo{
 typedef struct ConInfo{
     unsigned int cip;
     unsigned int fd;
+#ifdef CONFIG_SSL
+    SSL* ssl;
+#endif
 }ConInfo;
 
 
