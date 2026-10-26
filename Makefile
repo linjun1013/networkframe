@@ -3,6 +3,8 @@ PWD := $(shell pwd)
 USER_CFLAGS ?= -O1  -g -std=c11 -Wall -Wextra -Wl,-rpath,./.libs
 #USER_CFLAGS ?= -O1 -g  -Wall -Wextra -fsanitize=thread
 
+
+
 .PHONY:  user clean
 
 NETWORKFRAME = libnet
@@ -13,7 +15,8 @@ user: NETWORKFRAME net_work
 
 SO_SOURCE = networkframe.c util.c rpc.c util-hash.c
 NETWORKFRAME : $(SO_SOURCE)
-	$(CC) -fPIC -shared -O1 -g -o .libs/libnet.so  $^
+	#$(CC) -fPIC -shared -DCONFIG_SSL -lssl -O1 -g -o .libs/libnet.so  $^
+	$(CC) -fPIC -shared -ljansson -O1 -g -o .libs/libnet.so  $^
 
 NET_SOURCE = main.c
 NET_INCLUDE = util-hash.h  datatype.h siphash.h  util.h  networkframe.h rpc.h

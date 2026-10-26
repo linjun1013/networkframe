@@ -1,7 +1,9 @@
  #ifndef NETFREAM_RPC_H
  #define NETFREAM_RPC_H
 
-typedef void* (*cmd_hander) (char *, int len);
+ #include<jansson.h>
+
+typedef void* (*cmd_hander) (void *);
 
 typedef struct RpcCmd{
     unsigned int cmd_type;
@@ -23,9 +25,9 @@ void registCmd(const unsigned int cmd, cmd_hander func);
 
 void unregistCmd(const unsigned int cmd); 
 
-unsigned int  parseRpcCmd(const char * msg, const unsigned int len, char **param, int *param_len);
+unsigned int parseRpcCmd(const char * msg, const unsigned int len, json_t **param);
 
 
-void* execRpcCmd(const int cmd, char* param, int param_len);
+void* execRpcCmd(const int cmd, const json_t* param);
 
  #endif

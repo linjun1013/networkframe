@@ -3,16 +3,17 @@
 #include <stdio.h>
 #include <sys/sdt.h>
 
+
 #include"rpc.h"
 
 void registCmd(const unsigned int cmd, cmd_hander func)
 {
-   if(cmd == RPC_CMD_UNKNOW || func == NULL)
+    if(cmd == RPC_CMD_UNKNOW || func == NULL)
         return;
 
-   if(cmd > RPC_CMD_MAX || cmd == RPC_CMD_MAX)
+    if(cmd > RPC_CMD_MAX || cmd == RPC_CMD_MAX)
         return;
-    
+
     if(rpcCmdArray[cmd] != NULL){
         printf("cmd %d, have registed\n", cmd);
         return;
@@ -34,15 +35,21 @@ void unregistCmd(const unsigned int cmd)
         free(rpcCmdArray[cmd]);
         rpcCmdArray[cmd] = NULL;
     }
+}
 
+static void probeParseRpcCmd(void * arg, int var)
+{
+    DTRACE_PROBE2(rpc, parseRpcCmd, arg, var);
 }
 
 //cmdtype + param len + param
 
-unsigned int parseRpcCmd(const char * msg, const unsigned int len, char **param, int *param_len)
+unsigned int parseRpcCmd(const char* msg, const unsigned int len, json_t **param)
 {
     if(msg == NULL || len < RPC_CMD_HEAD_LEN)
         return 0;
+
+    probeParseRpcCmd((void*)msg, len);
 
     int cmd_type = 0;
     char * pos = strchr(msg, '_');
@@ -57,30 +64,28 @@ unsigned int parseRpcCmd(const char * msg, const unsigned int len, char **param,
 
     if(*param != NULL){
         char *pos = strchr(pos, '_');
-        *param = pos;
-        int head_len = pos - msg;
-        *param_len = len - head_len;
+        if(pos != NULL){
+            int head_len = pos - msg;
+            json_error_t error;
+            *param = json_loadb(pos + 1, len - head_len, 0, &error);
+            if(*param == NULL)
+                printf("json_loadb  failed : %s\n", pos);
+        }
     }
 
     return cmd_type;
 }
 
 
-static void probeExecRpcCmd(void * arg, int var)
+void* execRpcCmd(const int cmd, const json_t* param)
 {
-     DTRACE_PROBE2(rpc, execRpcCmd, arg, var);
-}
-
-void* execRpcCmd(const int cmd, char* param, int param_len)
-{
-   probeExecRpcCmd(param, cmd);
-   void* ret = NULL;
-   if(cmd > RPC_CMD_UNKNOW && cmd < RPC_CMD_MAX){
+    void* ret = NULL;
+    if(cmd > RPC_CMD_UNKNOW && cmd < RPC_CMD_MAX){
         if(rpcCmdArray[cmd] && rpcCmdArray[cmd]->func){
-            ret = rpcCmdArray[cmd]->func(param, param_len);
+            ret = rpcCmdArray[cmd]->func((void *)param);
         }
-   }
+    }
 
-   return ret;
+    return ret;
 }
 

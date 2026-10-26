@@ -87,12 +87,12 @@ static void* thread_work(void *arg)
                     msg = fdbuf->extbuf;
                     max_msg_len = fdbuf->ext_len;
                 }
-                
+
 #ifdef CONFIG_SSL
                 if(con->ssl){
                     while (len < max_msg_len &&(ret = SSL_read(con->ssl, msg+len, max_msg_len)) > 0){
                         ADD_READ_LEN(len, ret)
-                    }    
+                    }
                 }else{
                     while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
                         ADD_READ_LEN(len, ret)
@@ -116,10 +116,12 @@ static void* thread_work(void *arg)
                 if(unlikely(fun_ptr)){
                     fun_ptr((ThreadInfo *)arg, msg, len);
                 }else if(len){
-                    char * param;
+                    json_t * param = NULL;
                     int param_len;
-                    unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param, &param_len);
-                    execRpcCmd(cmd_type, param, param_len);
+                    unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param);
+                    execRpcCmd(cmd_type, param);
+                    if(param)
+                        json_decref(param);
                     write(fd, msg, len);
                 }
                 
