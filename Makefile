@@ -13,13 +13,13 @@ all:  user
 
 user: NETWORKFRAME net_work
 
-SO_SOURCE = networkframe.c util.c rpc.c util-hash.c
+SO_SOURCE = networkframe.c util.c rpc.c util-hash.c connhelper.c
 NETWORKFRAME : $(SO_SOURCE)
-	#$(CC) -fPIC -shared -DCONFIG_SSL -lssl -O1 -g -o .libs/libnet.so  $^
+	#$(CC) -fPIC -shared -DCONFIG_SSL -lssl -lcrypto -ljansson -O1 -g -o .libs/libnet.so  $^
 	$(CC) -fPIC -shared -ljansson -O1 -g -o .libs/libnet.so  $^
 
 NET_SOURCE = main.c
-NET_INCLUDE = util-hash.h  datatype.h siphash.h  util.h  networkframe.h rpc.h
+NET_INCLUDE =  datatype.h util.h  networkframe.h
 
 net_work: $(NET_SOURCE) $(NET_INCLUDE)
 	$(CC) $(USER_CFLAGS)   -o $@ $^  -L./.libs -lnet -lpthread

@@ -24,13 +24,29 @@ extern "C" {
 #define LENGTHOF(array) (sizeof (array) / sizeof ((array)[0]))
 
 
+typedef struct ConInfo{
+    unsigned int cip;
+    unsigned int fd;
+    struct ConInfo *next;
+#ifdef CONFIG_SSL
+    SSL* ssl;
+#endif
+}ConInfo;
+
+#define MAX_CON_INFO_SIZE (512)
+typedef struct ConInfoList{
+    ConInfo* head;
+    ConInfo* tail;
+    int con_size;
+}ConInfoList;
+
+
 typedef struct ThreadInfo{
     pthread_t tid;
     int target;
     int pipefd[2];
-    unsigned char flags;
     HashTable* bufhash;
-    void* data;
+    ConInfoList con_list;
     void (*thread_hander) (struct ThreadInfo *thread_var, char *, int len);
 } ThreadInfo;
 
@@ -50,14 +66,6 @@ typedef struct ListenInfo{
     uint8_t ssl;
 }ListenInfo;
 
-typedef struct ConInfo{
-    unsigned int cip;
-    unsigned int fd;
-#ifdef CONFIG_SSL
-    SSL* ssl;
-#endif
-}ConInfo;
-
 
 
 typedef struct FdBuff{
@@ -65,7 +73,7 @@ typedef struct FdBuff{
     char fixbuf[512];
     void *extbuf;
     int ext_len;
-    FdBuff *next;
+    struct FdBuff *next;
 }FdBuff;
 
 

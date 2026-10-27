@@ -1,9 +1,12 @@
+#define _GNU_SOURCE
 #include<string.h>
 #include<unistd.h>
 #include<stdio.h>
 #include<stdlib.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/epoll.h>
 
 
@@ -18,6 +21,7 @@
 
 #include"networkframe.h"
 #include"rpc.h"
+#include"connhelper.h"
 
 #include <sys/sdt.h>
 
@@ -132,7 +136,7 @@ static void* thread_work(void *arg)
                         SSL_free(con->ssl);
 #endif
                     HashTableRemove(info->bufhash, con, sizeof(con));
-                    free(con);
+                    putConInfo(&(info->con_list), con);
                     close(fd);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
@@ -149,8 +153,8 @@ static void* thread_work(void *arg)
                 printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
                 int flags = fcntl(cid, F_GETFL, 0);
                 fcntl(cid, F_SETFL, flags | O_NONBLOCK);
-                
-                ConInfo *con = (ConInfo *)malloc(sizeof(ConInfo));
+
+                ConInfo *con = getConInfo(&(info->con_list));
                 con->cip = cip;
                 con->fd = cid;
 #ifdef CONFIG_SSL
@@ -167,6 +171,13 @@ static void* thread_work(void *arg)
                 event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
                 if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
                     printf("epoll_ctl add failed %d efd:%d\n", cid, efd);
+
+                FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
+                memset(buf, 0, sizeof(FdBuff));
+                buf->con.fd = cid;
+                buf->con.cip = cip;
+                HashTableAdd(info->bufhash, buf, sizeof(buf));
+
             }else if(evs[i].events & EPOLLOUT){
                 //int fd = evs[i].data.fd;
                 //write(fd, "111", 3);
@@ -177,10 +188,10 @@ static void* thread_work(void *arg)
                 close(fd);
 #ifdef CONFIG_SSL
                 if(con->ssl)
-                    SSL_CTX_free(con->ssl);
+                    SSL_free(con->ssl);
 #endif
                 HashTableRemove(info->bufhash, con, sizeof(con));
-                free(con);
+                putConInfo(&(info->con_list), con);
             }
         }
     }
@@ -198,7 +209,7 @@ void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set)
 
     for(int i = 0; i< pool->size; i++)
     {
-        sched_setaffinity(pool->threads[i]->tid, sizeof(*set), &set);    
+        sched_setaffinity(pool->threads[i]->tid, sizeof(*set), set);    
     }
 }
 
@@ -273,8 +284,8 @@ void initEnv(const char *path)
             printf("ssl load key failed\n");
         }
     }else{
-        char crt[256] = 0;
-        char key[256] = 0;
+        char crt[256] = {0};
+        char key[256] = {0};
         snprintf(crt, 256, "%s/%s",path, "server.crt");
         if (SSL_CTX_use_certificate_chain_file(ssl_ctx, crt) <= 0)
         {
@@ -317,6 +328,7 @@ ThreadPool* initThreadPool(int cnt,  void* func)
         pipe(info->pipefd);
 
         info->bufhash = HashTableInit(16, bufHash, bufHashCompare, bufHashFree);
+
         pool->threads[i] = info;
 
         printf("===== i:%d \n", i);
@@ -393,18 +405,11 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
                     if(likely(thread_cnt > 0))
                         index = c_ids++ % thread_cnt;
 
-                    ThreadInfo *info = pool->threads[index];
-                    FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
-                    memset(buf, 0, sizeof(FdBuff));
-                    buf->con.fd = client_sockfd;
-
                     struct sockaddr_in client_addr;
                     socklen_t addr_len = sizeof(client_addr);
                     getpeername(client_sockfd, (struct sockaddr *)&client_addr, &addr_len);
-                    buf->con.cip = client_addr.sin_addr.s_addr;
-                    HashTableAdd(info->bufhash, buf, sizeof(buf));
 
-                    unsigned long ip_fd = ((unsigned long)buf->con.cip << 32);
+                    unsigned long ip_fd = ((unsigned long)(client_addr.sin_addr.s_addr) << 32);
                     ip_fd = ip_fd | client_sockfd;
 #ifdef CONFIG_SSL
                     uint8_t ssl_flag = 0;
@@ -508,4 +513,3 @@ ListenInfo* init_address_v6(const char * addr, unsigned int port, int backlog, u
  
     return info;
 }
-
