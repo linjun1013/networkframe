@@ -127,13 +127,13 @@ static void* thread_work(void *arg)
                 
                 if((ret == 0) || (ret < 0 && errno != EAGAIN)){
                     epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
-                    close(fd);
 #ifdef CONFIG_SSL
                     if(con->ssl)
-                        SSL_CTX_free(con->ssl);
+                        SSL_free(con->ssl);
 #endif
                     HashTableRemove(info->bufhash, con, sizeof(con));
                     free(con);
+                    close(fd);
                 }
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
                 unsigned long cip_fd = 0;
@@ -154,16 +154,11 @@ static void* thread_work(void *arg)
                 con->cip = cip;
                 con->fd = cid;
 #ifdef CONFIG_SSL
+                con->ssl = NULL;
                 if(ssl_flag){
-                    con->ssl = SSL_new(ssl_ctx);
-                    SSL_set_fd(con->ssl, cid);
-                    if (SSL_accept(con->ssl) <= 0) {
-                        printf("SSL_accept n", cid, efd);
-                        SSL_free(con->ssl);
-                        close(cid);
-                        free(con);
-                        continue;
-                    }
+                    unsigned long ssl_ptr = 0;
+                    read(pipefd, &ssl_ptr, sizeof(ssl_ptr));
+                    con->ssl = (SSL*)ssl_ptr;
                 }
 
 #endif
@@ -253,7 +248,7 @@ static void signal_handler(int sig)
     exit(0);
 }
 
-void initEnv(void)
+void initEnv(const char *path)
 {
 
 #ifdef CONFIG_INSTANCE
@@ -265,10 +260,37 @@ void initEnv(void)
 
 #ifdef CONFIG_SSL
     SSL_library_init();
+    OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
-    SSLeay_add_ssl_algorithms();
     
     ssl_ctx = SSL_CTX_new(SSLv23_server_method());
+    if(path == NULL){
+        if (SSL_CTX_use_certificate_chain_file(ssl_ctx, "./server.crt") <= 0)
+        {
+            printf("ssl load crt failed\n");
+        }
+        if (SSL_CTX_use_PrivateKey_file(ssl_ctx, "./server.key", SSL_FILETYPE_PEM) <= 0){
+            printf("ssl load key failed\n");
+        }
+    }else{
+        char crt[256] = 0;
+        char key[256] = 0;
+        snprintf(crt, 256, "%s/%s",path, "server.crt");
+        if (SSL_CTX_use_certificate_chain_file(ssl_ctx, crt) <= 0)
+        {
+            printf("ssl load crt failed\n");
+        }
+        snprintf(key, 256, "%s/%s",path, "server.key");
+        if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key, SSL_FILETYPE_PEM) <= 0){
+            printf("ssl load key failed\n");
+        }
+    }
+
+    if(!SSL_CTX_check_private_key(ssl_ctx))
+    {
+        printf("load ssl crt, key failed\n");
+    }
+
 #endif
 
     signal(SIGINT, signal_handler);
@@ -350,7 +372,7 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
     for(int pos = 0; pos < fd_cnt; pos++){
         ListenInfo *listen_info = infos[pos];
         event.data.ptr = listen_info;
-        event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
+        event.events = EPOLLIN | EPOLLHUP | EPOLLERR;
         epoll_ctl(efd, EPOLL_CTL_ADD, listen_info->fd, &event);
     }
 
@@ -384,14 +406,31 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
 
                     unsigned long ip_fd = ((unsigned long)buf->con.cip << 32);
                     ip_fd = ip_fd | client_sockfd;
-
-                    write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
 #ifdef CONFIG_SSL
                     uint8_t ssl_flag = 0;
                     if(list_info->ssl){
                         ssl_flag = 1;
                     }
-                    write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
+
+                    if(ssl_flag){
+                        SSL *ssl = SSL_new(ssl_ctx);
+                        SSL_set_fd(ssl, client_sockfd);
+                        int ret = SSL_accept(ssl);
+                        if(ret <= 0){
+                            printf("SSL_accept failed :%d", ret);
+                            SSL_free(ssl);
+                            continue;
+                        }
+                        unsigned long ssl_ptr = (unsigned long)ssl;
+                        write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
+                        write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
+                        write(pool->threads[index]->pipefd[1], &ssl_ptr, sizeof(ssl_ptr));
+                    }else{
+                        write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
+                        write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
+                    }
+#else
+                    write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
 #endif
 
 #ifdef NETWORK_DEBUG
@@ -407,7 +446,7 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
     }
 }
 
-ListenInfo * init_address(const char* addr, unsigned int port, uint8_t ssl)
+ListenInfo * init_address(const char* addr, unsigned int port, int backlog, uint8_t ssl)
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(sockfd < 0)
@@ -421,10 +460,15 @@ ListenInfo * init_address(const char* addr, unsigned int port, uint8_t ssl)
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if(addr == NULL)
+        server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    else
+        inet_pton(AF_INET, addr, &(server_addr.sin_addr.s_addr));
+
     bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
 
-    if(listen(sockfd, 256) != 0){
+    if(listen(sockfd, backlog) != 0){
         printf("listen fd %d failed exit\n", sockfd);
         return NULL;
     }
@@ -437,7 +481,7 @@ ListenInfo * init_address(const char* addr, unsigned int port, uint8_t ssl)
 }
 
 
-ListenInfo* init_address_v6(const char * addr, unsigned int port, uint8_t ssl)
+ListenInfo* init_address_v6(const char * addr, unsigned int port, int backlog, uint8_t ssl)
 {
     int sockfd_v6 = socket(AF_INET6, SOCK_STREAM, 0);
     int optval = 1;
@@ -450,9 +494,13 @@ ListenInfo* init_address_v6(const char * addr, unsigned int port, uint8_t ssl)
     struct sockaddr_in6 sa = {0};
     sa.sin6_family = AF_INET6;
     sa.sin6_port   = htons(port);
-    sa.sin6_addr = in6addr_any;
+    if(addr == NULL)
+        sa.sin6_addr = in6addr_any;
+    else
+        inet_pton(AF_INET6, addr, &sa.sin6_addr);
+
     bind(sockfd_v6, (struct sockaddr *)&sa, sizeof(sa));
-    listen(sockfd_v6, 256);
+    listen(sockfd_v6, backlog);
 
     ListenInfo *info = (ListenInfo*)malloc(sizeof(ListenInfo));
     info->fd = sockfd_v6;

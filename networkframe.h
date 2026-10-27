@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-void initEnv(void);
+void initEnv(const char *path);
 
 ThreadPool* initThreadPool(int cnt, void* func);
 
@@ -19,8 +19,8 @@ void destoryThreadPool(ThreadPool* pool);
 void notifyThread(ThreadPool* pool, void* var);
 
 
-ListenInfo* init_address(const char* addr, unsigned int port, uint8_t ssl);
-ListenInfo* init_address_v6(const char* addr, unsigned int port, uint8_t ssl);
+ListenInfo* init_address(const char* addr, unsigned int port, int backlog, uint8_t ssl);
+ListenInfo* init_address_v6(const char* addr, unsigned int port,int backlog, uint8_t ssl);
 
 
 void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt);

@@ -28,16 +28,16 @@ int main(void)
     prctl(PR_SET_NAME, "net_loop_work", 0, 0, 0);
     nice(-1);
 
-    initEnv();
+    initEnv(NULL);
     ThreadPool *pool = initThreadPool(5, NULL);
 
     ListenInfo* fds[2];
     int fd_cnt = 0;
-    fds[0] = init_address(NULL , 1234, 0);
+    fds[0] = init_address(NULL , 1234, 256 ,0);
     fd_cnt++;
 
 #ifdef CONFIG_IPV6_ENBALE
-    fds[1] = init_address_v6(NULL, 1235, 0);
+    fds[1] = init_address_v6(NULL, 1235, 256, 0);
     fd_cnt++;
 #endif 
 
