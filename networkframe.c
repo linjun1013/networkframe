@@ -39,6 +39,12 @@ static void peobeRead(void *arg)
     DTRACE_PROBE1(network, read, arg);
 }
 
+static void peobeProxyRead(int fd, int proxy_fd)
+{
+    DTRACE_PROBE2(network, proxyread, fd, proxy_fd);
+}
+
+
 #define ADD_READ_LEN(len, ret) \
 if(ret > 0 ) \
     len += ret; \
@@ -86,17 +92,18 @@ static void add_accept(int pipefd, int efd, ThreadInfo *info)
     }
 #endif
 
-    //struct epoll_event event;
     event.data.ptr = con;
     event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
     if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
         printf("epoll_ctl add failed %d efd:%d\n", cid, efd);
 
+#ifndef CONFIG_PROXY
     FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
     memset(buf, 0, sizeof(FdBuff));
     buf->con.fd = cid;
     buf->con.cip = cip;
     HashTableAdd(info->bufhash, buf, sizeof(buf));
+#endif
 }
 
 #ifdef CONFIG_PROXY
@@ -112,11 +119,13 @@ static void freeProxy(ConInfo *con)
 
 
 #ifdef CONFIG_PROXY
-void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
+static void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
 {
     ProxyInfo *proxy = con->proxy;
     if(proxy == NULL)
         return;
+
+    peobeProxyRead(con->fd, proxy->proxy_fd);
 
     int fd = con->fd;
     uint8_t proxy_flag = (proxy != NULL)? 1 : 0;
@@ -147,7 +156,6 @@ void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
                    freeProxy(con);
                    epoll_ctl(efd, EPOLL_CTL_DEL, proxy->proxy_fd, NULL);
                    epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
-                   HashTableRemove(info->bufhash, con, sizeof(con));
                    putConInfo(&(info->con_list), con);
                    close(fd);
                    break;
@@ -164,7 +172,7 @@ void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
 }
 #endif
 
-void recv_msg(int efd, ConInfo *con, ThreadInfo *info)
+static void recv_msg(int efd, ConInfo *con, ThreadInfo *info)
 {
     int fd = con->fd;
     int len = 0, ret = 0;
@@ -290,7 +298,9 @@ void* net_thread_work(void *arg)
 #elif  CONFIG_PROXY
                 freeProxy(con);
 #endif
+#ifndef CONFIG_SSL
                 HashTableRemove(info->bufhash, con, sizeof(con));
+#endif
                 putConInfo(&(info->con_list), con);
             }
         }
@@ -394,7 +404,7 @@ void initEnv(const char *path)
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    signal(SIGPIPE, SIG_IGN); 
+    signal(SIGPIPE, SIG_IGN);
 }
 
 #define EPOLL_EVENT_CNT 16
