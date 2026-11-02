@@ -6,7 +6,6 @@
 
 #include <stdlib.h>
 
-#include <sys/ipc.h>
 #include <sys/prctl.h>
 
 #include"util.h"
@@ -18,7 +17,8 @@
 
 #include <string.h>
 
-
+#include "threadpool.h"
+#include "address.h"
 #include "networkframe.h"
 
 
@@ -28,7 +28,7 @@ int main(void)
     nice(-1);
 
     initEnv(NULL);
-    ThreadPool *pool = initThreadPool(5, NULL);
+    ThreadPool *pool = initThreadPool(5, net_thread_work);
 
     ListenInfo* fds[2];
     int fd_cnt = 0;
@@ -39,6 +39,11 @@ int main(void)
     fds[1] = init_address_v6(NULL, 1235, 256, 0);
     fd_cnt++;
 #endif 
+
+#ifdef CONFIG_PROXY
+    fds[0]->proxy_ip = 0x7f000001;
+    fds[0]->proxy_port = 1237;
+#endif
 
     netframework_loop(pool, fds, fd_cnt);
     if(pool){

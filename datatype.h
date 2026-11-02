@@ -22,15 +22,24 @@ extern "C" {
 #define OFFSET(type, field)   ((long) &((type *)0)->field)
 
 #define LENGTHOF(array) (sizeof (array) / sizeof ((array)[0]))
-
+struct ConInfo;
+typedef struct ProxyInfo{
+    struct ConInfo *con;
+    int proxy_fd;
+    int pipefd[2];
+}ProxyInfo;
 
 typedef struct ConInfo{
     unsigned int cip;
     unsigned int fd;
     struct ConInfo *next;
+#ifdef CONFIG_PROXY
+    struct ProxyInfo *proxy;
+#endif
 #ifdef CONFIG_SSL
     SSL* ssl;
 #endif
+
 }ConInfo;
 
 #define MAX_CON_INFO_SIZE (512)
@@ -63,7 +72,12 @@ typedef struct NotifyInfo{
 
 typedef struct ListenInfo{
     int fd;
+#ifdef CONFIG_PROXY
+    int proxy_ip;
+    int proxy_port;
+#endif
     uint8_t ssl;
+
 }ListenInfo;
 
 

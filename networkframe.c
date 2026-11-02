@@ -46,10 +46,191 @@ else \
     break; \
 
 
+static void add_accept(int pipefd, int efd, ThreadInfo *info)
+{
+    ConInfo *con = getConInfo(&(info->con_list));    
+    unsigned long cip_fd = 0;
+    read(pipefd, &cip_fd, sizeof(cip_fd));
+    int cip = cip_fd >> 32;
+    unsigned int cid = (cip_fd & 0x00000000ffffffff);
+    printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
+    int flags = fcntl(cid, F_GETFL, 0);
+    fcntl(cid, F_SETFL, flags | O_NONBLOCK);
+
+    con->cip = cip;
+    con->fd = cid;
+    struct epoll_event event;
+
+#ifdef CONFIG_SSL
+    uint8_t ssl_flag = 0;
+    read(pipefd, &ssl_flag, sizeof(ssl_flag));
+    if(ssl_flag){
+        unsigned long ssl_ptr = 0;
+        read(pipefd, &ssl_ptr, sizeof(ssl_ptr));
+        con->ssl = (SSL*)ssl_ptr;
+    }
+#elif CONFIG_PROXY
+    int proxy_fd = 0;
+    read(pipefd, &proxy_fd, sizeof(proxy_fd));
+    if(proxy_fd){
+        int flags = fcntl(proxy_fd, F_GETFL, 0);
+        fcntl(proxy_fd, F_SETFL, flags | O_NONBLOCK);
+        con->proxy = (ProxyInfo *)malloc(sizeof(ProxyInfo));
+        pipe2(con->proxy->pipefd, O_NONBLOCK);
+        con->proxy->proxy_fd = proxy_fd;
+        con->proxy->con = con;
+        event.data.ptr = con->proxy;
+        event.events = EPOLLOUT | EPOLLET;
+        if(epoll_ctl(efd, EPOLL_CTL_ADD, proxy_fd, &event))
+            printf("epoll_ctl add proxy failed %d efd:%d\n", cid, efd);
+    }
+#endif
+
+    //struct epoll_event event;
+    event.data.ptr = con;
+    event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
+    if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
+        printf("epoll_ctl add failed %d efd:%d\n", cid, efd);
+
+    FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
+    memset(buf, 0, sizeof(FdBuff));
+    buf->con.fd = cid;
+    buf->con.cip = cip;
+    HashTableAdd(info->bufhash, buf, sizeof(buf));
+}
+
+#ifdef CONFIG_PROXY
+static void freeProxy(ConInfo *con)
+{
+    if(con->proxy == NULL)
+        return;
+    close(con->proxy->pipefd[0]);
+    close(con->proxy->pipefd[1]);
+    con->proxy = NULL;
+}
+#endif
 
 
+#ifdef CONFIG_PROXY
+void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
+{
+    ProxyInfo *proxy = con->proxy;
+    if(proxy == NULL)
+        return;
 
-static void* thread_work(void *arg)
+    int fd = con->fd;
+    uint8_t proxy_flag = (proxy != NULL)? 1 : 0;
+    int cnt = 0;
+    while (proxy_flag) {
+        int ret = splice(fd, NULL, proxy->pipefd[1], NULL, 32768, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+        if (ret < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            } else {
+                printf("splice read");
+                break;
+            }
+        } else if (ret == 0) {
+            break;
+        }else{
+            cnt += ret;
+        }
+    }
+    int written = 0;
+    while (proxy_flag && cnt)
+    {
+        if(written < cnt) {
+            ssize_t w = splice(proxy->pipefd[0], NULL, proxy->proxy_fd, NULL, cnt - written, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+            if (w <=  0) {
+                printf("splice write:%d error\n", w);
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                   freeProxy(con);
+                   epoll_ctl(efd, EPOLL_CTL_DEL, proxy->proxy_fd, NULL);
+                   epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
+                   HashTableRemove(info->bufhash, con, sizeof(con));
+                   putConInfo(&(info->con_list), con);
+                   close(fd);
+                   break;
+                } else {
+                   break;
+                } 
+            }else{
+                written += w;
+            }
+        }else{
+            break;
+        }   
+    }
+}
+#endif
+
+void recv_msg(int efd, ConInfo *con, ThreadInfo *info)
+{
+    int fd = con->fd;
+    int len = 0, ret = 0;
+    FdBuff *fdbuf = (FdBuff *)HashTableLookup(info->bufhash, con, sizeof(con));
+    if(unlikely(fdbuf == NULL)){
+        printf("get fd buf failed %d\n", fd);
+        return;
+    }
+
+    char *msg = fdbuf->fixbuf;
+    int max_msg_len = 512;
+    if(fdbuf->extbuf){
+        msg = fdbuf->extbuf;
+        max_msg_len = fdbuf->ext_len;
+    }
+#ifdef CONFIG_SSL
+    if(con->ssl){
+        while (len < max_msg_len &&(ret = SSL_read(con->ssl, msg+len, max_msg_len)) > 0){
+            ADD_READ_LEN(len, ret)
+        }
+    }else{
+        while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
+            ADD_READ_LEN(len, ret)
+        }
+    }
+#else
+    if(fd > 0){
+        while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
+            ADD_READ_LEN(len, ret)
+        }
+    }
+#endif
+    if(len < max_msg_len)
+        msg[len] = 0;
+    else
+        msg[max_msg_len - 1] = 0;
+
+    void  (*fun_ptr)(ThreadInfo * var, char *, int len) = info->thread_hander;
+    peobeRead(msg);
+    printf(" ==> get a new read from  %d  len:%d , msg:%p\n", fd, len, msg);
+    if(unlikely(fun_ptr)){
+        fun_ptr(info, msg, len);
+    }else if(len){
+        json_t * param = NULL;
+        int param_len;
+        unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param);
+        execRpcCmd(cmd_type, param);
+        if(param)
+            json_decref(param);
+
+        write(fd, msg, len);
+    }
+    if((ret == 0) || (ret < 0 && errno != EAGAIN)){
+        epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
+#ifdef CONFIG_SSL
+        if(con->ssl)
+            SSL_free(con->ssl);
+#endif
+        HashTableRemove(info->bufhash, con, sizeof(con));
+        putConInfo(&(info->con_list), con);
+        close(fd);
+    }       
+}
+
+
+void* net_thread_work(void *arg)
 {
     ThreadInfo *info = (ThreadInfo *)arg;
     int index = info ->target;
@@ -61,7 +242,6 @@ static void* thread_work(void *arg)
     pthread_setname_np(tid, name);
 
     int pipefd = info->pipefd[0];
-    void  (*fun_ptr)(ThreadInfo * var, char *, int len) = info->thread_hander;
 
     int efd = epoll_create(16);
     struct epoll_event event;
@@ -76,111 +256,29 @@ static void* thread_work(void *arg)
         {
             if(((evs[i].events & EPOLLIN) && evs[i].data.fd != pipefd)){
                 ConInfo *con = (ConInfo*)evs[i].data.ptr;
-                int fd = con->fd;
-                int len = 0, ret = 0;
-                
-                FdBuff *fdbuf = (FdBuff *)HashTableLookup(info->bufhash, con, sizeof(con));
-                if(fdbuf == NULL){
-                    printf("get fd buf failed %d\n", fd);
-                    continue;
-                }
+#ifdef CONFIG_PROXY
+                proxy_recv_msg(efd, con, info);
+#else
+                recv_msg(efd, con, info);
+#endif
+            }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
+                add_accept( pipefd, efd, info);
+            }else if(evs[i].events & EPOLLOUT){
 
-                char *msg = fdbuf->fixbuf;
-                int max_msg_len = 512;
-                if(fdbuf->extbuf){
-                    msg = fdbuf->extbuf;
-                    max_msg_len = fdbuf->ext_len;
-                }
-
-#ifdef CONFIG_SSL
-                if(con->ssl){
-                    while (len < max_msg_len &&(ret = SSL_read(con->ssl, msg+len, max_msg_len)) > 0){
-                        ADD_READ_LEN(len, ret)
+#ifdef CONFIG_PROXY
+                ProxyInfo *proxy = (ProxyInfo*)evs[i].data.ptr;
+                int proxy_fd = proxy->proxy_fd;
+                int cfd = proxy->con->fd;
+                int len = splice(proxy_fd, NULL, proxy->pipefd[1], NULL, 32768, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                if(len <= 0) {
+                    if(errno != EAGAIN && errno != EWOULDBLOCK){
+                        close(proxy_fd);
+                        epoll_ctl(efd, EPOLL_CTL_DEL, proxy_fd, NULL);
                     }
                 }else{
-                    while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
-                        ADD_READ_LEN(len, ret)
-                    }
-                }
-#else
-                if(fd > 0){
-                    while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
-                        ADD_READ_LEN(len, ret)
-                    }
+                    splice(proxy->pipefd[0], NULL, cfd, NULL, 32768, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 }
 #endif
-
-                if(len < max_msg_len)
-                    msg[len] = 0;
-                else
-                    msg[ max_msg_len - 1] = 0;
-                
-                peobeRead(msg);
-                printf(" ==> get a new read from  %d  len:%d , msg:%p\n", fd, len, msg);
-                if(unlikely(fun_ptr)){
-                    fun_ptr((ThreadInfo *)arg, msg, len);
-                }else if(len){
-                    json_t * param = NULL;
-                    int param_len;
-                    unsigned int cmd_type = parseRpcCmd((const char *)msg, len, &param);
-                    execRpcCmd(cmd_type, param);
-                    if(param)
-                        json_decref(param);
-                    write(fd, msg, len);
-                }
-                
-                if((ret == 0) || (ret < 0 && errno != EAGAIN)){
-                    epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
-#ifdef CONFIG_SSL
-                    if(con->ssl)
-                        SSL_free(con->ssl);
-#endif
-                    HashTableRemove(info->bufhash, con, sizeof(con));
-                    putConInfo(&(info->con_list), con);
-                    close(fd);
-                }
-            }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
-                unsigned long cip_fd = 0;
-                read(pipefd, &cip_fd, sizeof(cip_fd));
-
-#ifdef CONFIG_SSL
-                uint8_t ssl_flag = 0;
-                read(pipefd, &ssl_flag, sizeof(ssl_flag));
-#endif
-
-                int cip = cip_fd >> 32;
-                unsigned int cid = (cip_fd & 0x00000000ffffffff);
-                printf("==> get a new connect %d pipe:%d\n", cid, pipefd);
-                int flags = fcntl(cid, F_GETFL, 0);
-                fcntl(cid, F_SETFL, flags | O_NONBLOCK);
-
-                ConInfo *con = getConInfo(&(info->con_list));
-                con->cip = cip;
-                con->fd = cid;
-#ifdef CONFIG_SSL
-                con->ssl = NULL;
-                if(ssl_flag){
-                    unsigned long ssl_ptr = 0;
-                    read(pipefd, &ssl_ptr, sizeof(ssl_ptr));
-                    con->ssl = (SSL*)ssl_ptr;
-                }
-
-#endif
-                struct epoll_event event;
-                event.data.ptr = con;
-                event.events = EPOLLIN | EPOLLET | EPOLLHUP | EPOLLERR;
-                if(epoll_ctl(efd, EPOLL_CTL_ADD, cid, &event))
-                    printf("epoll_ctl add failed %d efd:%d\n", cid, efd);
-
-                FdBuff *buf = (FdBuff*)malloc(sizeof(FdBuff));
-                memset(buf, 0, sizeof(FdBuff));
-                buf->con.fd = cid;
-                buf->con.cip = cip;
-                HashTableAdd(info->bufhash, buf, sizeof(buf));
-
-            }else if(evs[i].events & EPOLLOUT){
-                //int fd = evs[i].data.fd;
-                //write(fd, "111", 3);
             }else if(evs[i].events & (EPOLLHUP | EPOLLERR) && (evs[i].data.fd != pipefd)){
                 ConInfo *con = (ConInfo*)evs[i].data.ptr;
                 int fd = con->fd;
@@ -189,6 +287,8 @@ static void* thread_work(void *arg)
 #ifdef CONFIG_SSL
                 if(con->ssl)
                     SSL_free(con->ssl);
+#elif  CONFIG_PROXY
+                freeProxy(con);
 #endif
                 HashTableRemove(info->bufhash, con, sizeof(con));
                 putConInfo(&(info->con_list), con);
@@ -199,18 +299,6 @@ static void* thread_work(void *arg)
     printf("========exit ======= \n");
     free(arg);
     return NULL;
-}
-
-
-void setThreadPoolCpuset(ThreadPool* pool, const cpu_set_t* set)
-{
-    if(pool == NULL || set == NULL)
-        return;
-
-    for(int i = 0; i< pool->size; i++)
-    {
-        sched_setaffinity(pool->threads[i]->tid, sizeof(*set), set);    
-    }
 }
 
 static uint32_t bufHash(HashTable *ht, void *data, uint16_t datalen)
@@ -306,67 +394,7 @@ void initEnv(const char *path)
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-}
-
-ThreadPool* initThreadPool(int cnt,  void* func)
-{
-    if(cnt <= 0)
-        return NULL;
-
-    if(func == NULL)
-        func = thread_work;
-
-    ThreadPool *pool = (ThreadPool *)malloc(sizeof(ThreadPool));
-    pool->threads = (ThreadInfo **)malloc(sizeof(void*)*cnt);
-    pool->size = cnt;
-
-    for(int i = 0; i < cnt; i++)
-    {
-        ThreadInfo *info = (ThreadInfo *)malloc(sizeof(ThreadInfo));
-        memset(info, 0, sizeof(ThreadInfo));
-        info->target = i;
-        pipe(info->pipefd);
-
-        info->bufhash = HashTableInit(16, bufHash, bufHashCompare, bufHashFree);
-
-        pool->threads[i] = info;
-
-        printf("===== i:%d \n", i);
-        pthread_create(&(info->tid), NULL, func, info);
-        pthread_detach(info->tid);
-    }
-
-    return pool;
-}
-
-void destoryThreadPool(ThreadPool *pool)
-{
-    if(pool == NULL || pool->threads == NULL)
-        return;
-
-    for(int i = 0; i< pool->size; i++){
-        close(pool->threads[i]->pipefd[0]);
-        close(pool->threads[i]->pipefd[1]);
-        HashTableFree(pool->threads[i]->bufhash);
-        free(pool->threads[i]);
-    }
-
-    free(pool->threads);
-    pool->threads = NULL;
-    pool->size = 0;
-}
-
-void notifyThread(ThreadPool *pool, void * var)
-{
-    if(pool == NULL || var == NULL)
-        return;
-
-    NotifyInfo *info = (NotifyInfo*)var;
-    int index = info->index;
-      
-    char cid [16] = {0};
-    snprintf(cid, 16, "%d", info->cid);
-    write(pool->threads[index]->pipefd[1], cid, strlen(cid));
+    signal(SIGPIPE, SIG_IGN); 
 }
 
 #define EPOLL_EVENT_CNT 16
@@ -436,6 +464,18 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
                     }
 #else
                     write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
+#ifdef CONFIG_PROXY
+                    int proxy_fd = 0;
+                    if(list_info->proxy_ip){
+                        proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
+                        struct sockaddr_in sin;
+                        sin.sin_family = AF_INET;
+                        sin.sin_port = htons(list_info->proxy_port);
+                        sin.sin_addr.s_addr = htonl(list_info->proxy_ip);
+                        connect(proxy_fd, (struct sockaddr *)&sin, sizeof(sin));
+                    }
+                    write(pool->threads[index]->pipefd[1], &proxy_fd, sizeof(proxy_fd));
+#endif
 #endif
 
 #ifdef NETWORK_DEBUG
@@ -451,65 +491,4 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
     }
 }
 
-ListenInfo * init_address(const char* addr, unsigned int port, int backlog, uint8_t ssl)
-{
-    int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if(sockfd < 0)
-        return NULL;
-    
-    int optval = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
-    
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
 
-    if(addr == NULL)
-        server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    else
-        inet_pton(AF_INET, addr, &(server_addr.sin_addr.s_addr));
-
-    bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
-
-    if(listen(sockfd, backlog) != 0){
-        printf("listen fd %d failed exit\n", sockfd);
-        return NULL;
-    }
-
-    ListenInfo *info = (ListenInfo*)malloc(sizeof(ListenInfo));
-    info->fd = sockfd;
-    info->ssl = ssl;
-
-    return info;
-}
-
-
-ListenInfo* init_address_v6(const char * addr, unsigned int port, int backlog, uint8_t ssl)
-{
-    int sockfd_v6 = socket(AF_INET6, SOCK_STREAM, 0);
-    int optval = 1;
-
-    setsockopt(sockfd_v6, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    setsockopt(sockfd_v6, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
-    int v6only = 1;
-
-    setsockopt(sockfd_v6, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
-    struct sockaddr_in6 sa = {0};
-    sa.sin6_family = AF_INET6;
-    sa.sin6_port   = htons(port);
-    if(addr == NULL)
-        sa.sin6_addr = in6addr_any;
-    else
-        inet_pton(AF_INET6, addr, &sa.sin6_addr);
-
-    bind(sockfd_v6, (struct sockaddr *)&sa, sizeof(sa));
-    listen(sockfd_v6, backlog);
-
-    ListenInfo *info = (ListenInfo*)malloc(sizeof(ListenInfo));
-    info->fd = sockfd_v6;
-    info->ssl = ssl;
- 
-    return info;
-}

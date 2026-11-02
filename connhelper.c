@@ -2,6 +2,8 @@
 #include <string.h>
 #include"connhelper.h"
 
+
+
 ConInfo* getConInfo(ConInfoList * list)
 {
     if(list->head == NULL){
@@ -21,10 +23,12 @@ ConInfo* getConInfo(ConInfoList * list)
     }
 }
 
+
 void putConInfo(ConInfoList *list, ConInfo* con)
 {
     if(con == NULL)
         return;
+
     if(list->con_size >= MAX_CON_INFO_SIZE){
         free(con);
         return;
