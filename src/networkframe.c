@@ -22,6 +22,7 @@
 #include"networkframe.h"
 #include"rpc.h"
 #include"connhelper.h"
+#include"address.h"
 
 #include <sys/sdt.h>
 
@@ -54,7 +55,7 @@ else \
 
 static void add_accept(int pipefd, int efd, ThreadInfo *info)
 {
-    ConInfo *con = getConInfo(&(info->con_list));    
+    ConInfo *con = getConInfo(&(info->con_list));
     unsigned long cip_fd = 0;
     read(pipefd, &cip_fd, sizeof(cip_fd));
     int cip = cip_fd >> 32;
@@ -79,8 +80,11 @@ static void add_accept(int pipefd, int efd, ThreadInfo *info)
     int proxy_fd = 0;
     read(pipefd, &proxy_fd, sizeof(proxy_fd));
     if(proxy_fd){
-        int flags = fcntl(proxy_fd, F_GETFL, 0);
-        fcntl(proxy_fd, F_SETFL, flags | O_NONBLOCK);
+        // int con_flag = 0;
+        // read(pipefd, &con_flag, sizeof(con_flag));
+        // if(con_flag == EINPROGRESS){
+        //     continue;
+        // }
         con->proxy = (ProxyInfo *)malloc(sizeof(ProxyInfo));
         pipe2(con->proxy->pipefd, O_NONBLOCK);
         con->proxy->proxy_fd = proxy_fd;
@@ -88,7 +92,7 @@ static void add_accept(int pipefd, int efd, ThreadInfo *info)
         event.data.ptr = con->proxy;
         event.events = EPOLLOUT | EPOLLET;
         if(epoll_ctl(efd, EPOLL_CTL_ADD, proxy_fd, &event))
-            printf("epoll_ctl add proxy failed %d efd:%d\n", cid, efd);
+            printf("epoll_ctl add proxy failed %d efd:%d\n", proxy_fd, efd);
     }
 #endif
 
@@ -158,16 +162,14 @@ static void proxy_recv_msg(int efd, ConInfo *con, ThreadInfo *info)
                    epoll_ctl(efd, EPOLL_CTL_DEL, fd, NULL);
                    putConInfo(&(info->con_list), con);
                    close(fd);
-                   break;
-                } else {
-                   break;
                 } 
+                break;
             }else{
                 written += w;
             }
         }else{
             break;
-        }   
+        }
     }
 }
 #endif
@@ -188,23 +190,21 @@ static void recv_msg(int efd, ConInfo *con, ThreadInfo *info)
         msg = fdbuf->extbuf;
         max_msg_len = fdbuf->ext_len;
     }
+
+    int ssl_flag = 0;
 #ifdef CONFIG_SSL
-    if(con->ssl){
+    if(likely(con->ssl)){
+        ssl_flag = 1;
         while (len < max_msg_len &&(ret = SSL_read(con->ssl, msg+len, max_msg_len)) > 0){
-            ADD_READ_LEN(len, ret)
-        }
-    }else{
-        while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
-            ADD_READ_LEN(len, ret)
-        }
-    }
-#else
-    if(fd > 0){
-        while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
             ADD_READ_LEN(len, ret)
         }
     }
 #endif
+    if(ssl_flag == 0){
+        while((len < max_msg_len) && (ret = read(fd, msg+len, max_msg_len))) {
+            ADD_READ_LEN(len, ret)
+        }  
+    }
     if(len < max_msg_len)
         msg[len] = 0;
     else
@@ -270,7 +270,7 @@ void* net_thread_work(void *arg)
                 recv_msg(efd, con, info);
 #endif
             }else if((evs[i].events & EPOLLIN) && evs[i].data.fd == pipefd){
-                add_accept( pipefd, efd, info);
+                add_accept(pipefd, efd, info);
             }else if(evs[i].events & EPOLLOUT){
 
 #ifdef CONFIG_PROXY
@@ -298,7 +298,7 @@ void* net_thread_work(void *arg)
 #elif  CONFIG_PROXY
                 freeProxy(con);
 #endif
-#ifndef CONFIG_SSL
+#ifndef CONFIG_PROXY
                 HashTableRemove(info->bufhash, con, sizeof(con));
 #endif
                 putConInfo(&(info->con_list), con);
@@ -336,7 +336,7 @@ static char bufHashCompare(void *data1, uint16_t len1, void *data2, uint16_t len
     if(con1->cip == con2->cip && con1->fd == con2->fd)
         return 1;
 
-    return 0;   
+    return 0;
 }
 
 static void bufHashFree(void *data)
@@ -449,6 +449,7 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
 
                     unsigned long ip_fd = ((unsigned long)(client_addr.sin_addr.s_addr) << 32);
                     ip_fd = ip_fd | client_sockfd;
+                    int pipefd = pool->threads[index]->pipefd[1];
 #ifdef CONFIG_SSL
                     uint8_t ssl_flag = 0;
                     if(list_info->ssl){
@@ -460,32 +461,37 @@ void netframework_loop(ThreadPool* pool, ListenInfo **infos, int fd_cnt)
                         SSL_set_fd(ssl, client_sockfd);
                         int ret = SSL_accept(ssl);
                         if(ret <= 0){
+                            write(client_sockfd, "ssl accept failed", 19);
+                            close(client_sockfd);
                             printf("SSL_accept failed :%d", ret);
                             SSL_free(ssl);
                             continue;
                         }
                         unsigned long ssl_ptr = (unsigned long)ssl;
-                        write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
-                        write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
-                        write(pool->threads[index]->pipefd[1], &ssl_ptr, sizeof(ssl_ptr));
+                        write(pipefd, &ip_fd, sizeof(ip_fd));
+                        write(pipefd, &ssl_flag, sizeof(ssl_flag));
+                        write(pipefd, &ssl_ptr, sizeof(ssl_ptr));
                     }else{
-                        write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
-                        write(pool->threads[index]->pipefd[1], &ssl_flag, sizeof(ssl_flag));
+                        write(pipefd, &ip_fd, sizeof(ip_fd));
+                        write(pipefd, &ssl_flag, sizeof(ssl_flag));
                     }
-#else
-                    write(pool->threads[index]->pipefd[1], &ip_fd, sizeof(ip_fd));
-#ifdef CONFIG_PROXY
+
+#elif CONFIG_PROXY
                     int proxy_fd = 0;
+                    int ret = 0;
                     if(list_info->proxy_ip){
-                        proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
-                        struct sockaddr_in sin;
-                        sin.sin_family = AF_INET;
-                        sin.sin_port = htons(list_info->proxy_port);
-                        sin.sin_addr.s_addr = htonl(list_info->proxy_ip);
-                        connect(proxy_fd, (struct sockaddr *)&sin, sizeof(sin));
+                        ret = proxy_connect(&proxy_fd, list_info->proxy_ip, list_info->proxy_port);
+                        if(ret < 0) {
+                            write(client_sockfd, "connect proxy failed", 22);
+                            close(client_sockfd);
+                            continue;
+                        }
                     }
-                    write(pool->threads[index]->pipefd[1], &proxy_fd, sizeof(proxy_fd));
-#endif
+                    write(pipefd, &ip_fd, sizeof(ip_fd));
+                    write(pipefd, &proxy_fd, sizeof(proxy_fd));
+#else
+                    write(pipefd, &ip_fd, sizeof(ip_fd));
+
 #endif
 
 #ifdef NETWORK_DEBUG

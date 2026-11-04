@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 
 #include"address.h"
 
@@ -33,7 +34,8 @@ ListenInfo *init_address(const char* addr, unsigned int port, int backlog, uint8
         server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     else
         inet_pton(AF_INET, addr, &(server_addr.sin_addr.s_addr));
-
+    int timeout = 5;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &timeout, sizeof(timeout));
     bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
 
     if(listen(sockfd, backlog) != 0){
@@ -65,7 +67,8 @@ ListenInfo* init_address_v6(const char * addr, unsigned int port, int backlog, u
         sa.sin6_addr = in6addr_any;
     else
         inet_pton(AF_INET6, addr, &sa.sin6_addr);
-
+    int timeout = 5;
+    setsockopt(sockfd_v6, IPPROTO_TCP, TCP_DEFER_ACCEPT, &timeout, sizeof(timeout));
     bind(sockfd_v6, (struct sockaddr *)&sa, sizeof(sa));
     listen(sockfd_v6, backlog);
 
@@ -74,4 +77,21 @@ ListenInfo* init_address_v6(const char * addr, unsigned int port, int backlog, u
     info->ssl = ssl;
 
     return info;
+}
+
+int proxy_connect(int *proxy_fd, int proxy_ip, int proxy_port)
+{
+    *proxy_fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    int flags = fcntl(*proxy_fd, F_GETFL, 0);
+    fcntl(*proxy_fd, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in sin;
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(proxy_port);
+    sin.sin_addr.s_addr = htonl(proxy_ip);
+    int ret = connect(*proxy_fd, (struct sockaddr *)&sin, sizeof(sin));
+    if(errno == EINPROGRESS)
+        ret = EINPROGRESS;
+    return ret;
 }
